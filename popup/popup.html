@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CookieReject</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Header -->
+    <header class="header">
+      <div class="header-left">
+        <img src="../icons/icon-32.png" alt="CookieReject" class="logo">
+        <div>
+          <h1 class="app-title">CookieReject</h1>
+          <span class="app-version">v1.0.0</span>
+        </div>
+      </div>
+      <label class="toggle-switch" title="Enable/Disable">
+        <input type="checkbox" id="toggle-enabled" checked>
+        <span class="toggle-slider"></span>
+      </label>
+    </header>
+
+    <!-- Current Site Status -->
+    <section class="current-site">
+      <div class="site-info">
+        <span class="site-label">Current Site</span>
+        <span class="site-domain" id="current-domain">Loading...</span>
+      </div>
+      <div class="site-status" id="site-status">
+        <span class="status-dot"></span>
+        <span class="status-text">Checking...</span>
+      </div>
+      <div class="site-actions">
+        <button class="btn btn-sm btn-outline" id="btn-whitelist" title="Allow cookies on this site and its subdomains">
+          Whitelist
+        </button>
+        <button class="btn btn-sm btn-outline" id="btn-blacklist" title="Always reject cookies on this site and its subdomains">
+          Blacklist
+        </button>
+        <button class="btn btn-sm btn-primary" id="btn-force-reject" title="Force reject cookies now">
+          Reject Now
+        </button>
+      </div>
+    </section>
+
+    <!-- Time Saved (HOT FEATURE) -->
+    <section class="time-saved-section">
+      <div class="time-saved-card">
+        <div class="time-saved-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"/>
+            <polyline points="12,6 12,12 16,14"/>
+          </svg>
+        </div>
+        <div class="time-saved-content">
+          <span class="time-saved-label">Time Saved</span>
+          <span class="time-saved-value" id="time-saved">0s</span>
+          <span class="time-saved-sub" id="time-saved-sub">using CookieReject</span>
+        </div>
+        <div class="time-saved-badge">HOT</div>
+      </div>
+    </section>
+
+    <!-- Stats Grid -->
+    <section class="stats-section">
+      <div class="stat-card">
+        <span class="stat-value" id="stat-rejected">0</span>
+        <span class="stat-label">Rejected</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-value" id="stat-vendors">0</span>
+        <span class="stat-label">Vendors Unticked</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-value" id="stat-sites">0</span>
+        <span class="stat-label">Sites Protected</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-value" id="stat-allowed">0</span>
+        <span class="stat-label">Allowed</span>
+      </div>
+    </section>
+
+    <!-- Navigation Tabs -->
+    <nav class="nav-tabs">
+      <button class="nav-tab active" data-tab="activity">Activity</button>
+      <button class="nav-tab" data-tab="lists">Manage Lists</button>
+      <button class="nav-tab" data-tab="settings">Settings</button>
+    </nav>
+
+    <!-- Tab Content: Activity -->
+    <div class="tab-content active" id="tab-activity">
+      <div class="activity-list" id="activity-list">
+        <div class="empty-state">
+          <span class="empty-icon">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
+          </span>
+          <p>No activity yet. Browse the web and CookieReject will protect you!</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab Content: Manage Lists -->
+    <div class="tab-content" id="tab-lists">
+      <div class="list-section">
+        <h3 class="list-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#4CAF50" stroke-width="2">
+            <path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+          </svg>
+          Whitelist
+          <span class="list-count" id="whitelist-count">0</span>
+        </h3>
+        <p class="list-desc">Sites where cookies are allowed (including subdomains)</p>
+        <div class="list-add-row">
+          <input type="text" id="whitelist-input" placeholder="e.g. example.com" class="list-input">
+          <button class="btn btn-sm btn-outline" id="btn-add-whitelist">Add</button>
+        </div>
+        <div class="list-items" id="whitelist-items">
+          <p class="list-empty">No whitelisted sites</p>
+        </div>
+      </div>
+      <div class="list-section">
+        <h3 class="list-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#f44336" stroke-width="2">
+            <path d="M18 6L6 18M6 6l12 12"/>
+          </svg>
+          Blacklist
+          <span class="list-count" id="blacklist-count">0</span>
+        </h3>
+        <p class="list-desc">Sites where cookies are always force-rejected (including subdomains)</p>
+        <div class="list-add-row">
+          <input type="text" id="blacklist-input" placeholder="e.g. annoyingsite.com" class="list-input">
+          <button class="btn btn-sm btn-outline" id="btn-add-blacklist">Add</button>
+        </div>
+        <div class="list-items" id="blacklist-items">
+          <p class="list-empty">No blacklisted sites</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab Content: Settings -->
+    <div class="tab-content" id="tab-settings">
+      <div class="setting-item">
+        <div class="setting-info">
+          <span class="setting-name">Auto-reject cookies</span>
+          <span class="setting-desc">Automatically reject cookie banners when detected</span>
+        </div>
+        <label class="toggle-switch-sm">
+          <input type="checkbox" id="setting-auto-reject" checked>
+          <span class="toggle-slider-sm"></span>
+        </label>
+      </div>
+      <div class="setting-item">
+        <div class="setting-info">
+          <span class="setting-name">Untick all vendors</span>
+          <span class="setting-desc">Scroll through vendor lists and untick every vendor toggle</span>
+        </div>
+        <label class="toggle-switch-sm">
+          <input type="checkbox" id="setting-untick-vendors" checked>
+          <span class="toggle-slider-sm"></span>
+        </label>
+      </div>
+      <div class="setting-item">
+        <div class="setting-info">
+          <span class="setting-name">Dismiss overlays</span>
+          <span class="setting-desc">Remove dark backdrops and scroll locks from consent popups</span>
+        </div>
+        <label class="toggle-switch-sm">
+          <input type="checkbox" id="setting-dismiss-overlays" checked>
+          <span class="toggle-slider-sm"></span>
+        </label>
+      </div>
+      <div class="setting-item">
+        <div class="setting-info">
+          <span class="setting-name">Use TCF API</span>
+          <span class="setting-desc">Reject consent via IAB Transparency & Consent Framework API</span>
+        </div>
+        <label class="toggle-switch-sm">
+          <input type="checkbox" id="setting-tcf-api" checked>
+          <span class="toggle-slider-sm"></span>
+        </label>
+      </div>
+      <div class="settings-actions">
+        <button class="btn btn-outline" id="btn-reset-stats">Reset Stats</button>
+        <button class="btn btn-outline" id="btn-clear-log">Clear Activity Log</button>
+      </div>
+      <div class="footer-info">
+        <span>CookieReject v1.0.0</span>
+        <span>Supports 15+ CMP frameworks</span>
+      </div>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

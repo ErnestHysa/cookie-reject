@@ -1,5 +1,5 @@
 {
-  "manifest_version": 2,
+  "manifest_version": 3,
   "name": "CookieReject",
   "short_name": "CookieReject",
   "version": "1.0.0",
@@ -7,12 +7,13 @@
   "permissions": [
     "storage",
     "tabs",
-    "activeTab",
+    "activeTab"
+  ],
+  "host_permissions": [
     "<all_urls>"
   ],
   "background": {
-    "scripts": ["background.js"],
-    "persistent": false
+    "service_worker": "background.js"
   },
   "content_scripts": [
     {
@@ -22,7 +23,7 @@
       "all_frames": true
     }
   ],
-  "browser_action": {
+  "action": {
     "default_popup": "popup/popup.html",
     "default_icon": {
       "16": "icons/icon-16.png",
@@ -38,6 +39,9 @@
     "128": "icons/icon-128.png"
   },
   "web_accessible_resources": [
-    "icons/*"
+    {
+      "resources": ["icons/*"],
+      "matches": ["<all_urls>"]
+    }
   ]
 }

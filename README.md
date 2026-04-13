@@ -204,7 +204,7 @@ Stats logged to background worker
 
 ```
 cookie-reject/
-├── manifest.json       Extension manifest (Manifest V2)
+├── manifest.json       Extension manifest (Manifest V3)
 ├── content.js          Content script -- consent rejection engine (57 KB)
 ├── background.js       Background worker -- stats, logging, storage
 ├── popup/
@@ -221,7 +221,7 @@ cookie-reject/
 
 ## Technical Details
 
-- **Manifest V2** for maximum Safari/Chrome/Firefox compatibility
+- **Manifest V3** for Chrome/Edge compatibility (Safari supports V3 via converter)
 - **Zero dependencies** -- pure vanilla JavaScript, HTML, CSS
 - **~47 seconds estimated** per manual cookie rejection (industry research)
 - **~2 seconds estimated** per manual vendor toggle untick

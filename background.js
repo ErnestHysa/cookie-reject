@@ -421,8 +421,8 @@
       const text = count > 0 ? String(count > 999 ? '999+' : count) : '';
 
       try {
-        chrome.browserAction.setBadgeText({ text });
-        chrome.browserAction.setBadgeBackgroundColor({ color: '#4CAF50' });
+        chrome.action.setBadgeText({ text });
+        chrome.action.setBadgeBackgroundColor({ color: '#4CAF50' });
       } catch {
         // Safari may not support all badge API methods
       }

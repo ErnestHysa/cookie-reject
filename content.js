@@ -23,7 +23,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     // How long to wait between retries when looking for a banner (ms)
     retryInterval: 500,
     // Maximum retries before giving up on a page
-    maxRetries: 40,  // 20 seconds total
+    maxRetries: 60,  // 30 seconds total (enough for slow async CMP scripts)
     // How long to wait between vendor toggle clicks (ms)
     vendorToggleDelay: 50,
     // How long to wait for dynamic content to load after clicking (ms)
@@ -222,6 +222,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         { id: 'sirdata', name: 'Sirdata', check: () => document.querySelector('[class*="sdrn-"]') || document.getElementById('sd-cmp') },
         { id: 'ezcookie', name: 'Ezoic (EzCookie)', check: () => document.querySelector('[class*="ez-cookie"]') || document.getElementById('ez-cookie-dialog') },
         { id: 'borlabs', name: 'Borlabs Cookie', check: () => document.querySelector('#BorlabsCookieBox') || window.BorlabsCookie },
+        { id: 'lgcookieslaw', name: 'LGCookiesLaw (PrestaShop)', check: () => document.getElementById('lgcookieslaw_banner') || document.querySelector('.lgcookieslaw-banner') || document.querySelector('[class*="lgcookieslaw"]') },
       ];
 
       for (const detector of detectors) {
@@ -1313,6 +1314,68 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       },
     },
 
+    // ──────────────── LGCookiesLaw (PrestaShop) ──────────────────
+    lgcookieslaw: {
+      detect() {
+        return !!(
+          document.getElementById('lgcookieslaw_banner') ||
+          document.querySelector('.lgcookieslaw-banner')
+        );
+      },
+
+      async reject() {
+        let rejected = 0;
+        let vendorsUnticked = 0;
+
+        const banner = document.getElementById('lgcookieslaw_banner');
+        if (!banner) return { rejected, vendorsUnticked };
+
+        // Strategy 1: Click "Reject All" button directly
+        const rejectBtn = banner.querySelector('.lgcookieslaw-reject-button');
+        if (rejectBtn) {
+          rejectBtn.click();
+          rejected++;
+          return { rejected, vendorsUnticked };
+        }
+
+        // Strategy 2: Open "Customize cookies" modal, untick all, save
+        const customizeLink = document.getElementById('lgcookieslaw_customize_cookies_link') ||
+          banner.querySelector('.lgcookieslaw-customize-cookies-link');
+        if (customizeLink) {
+          customizeLink.click();
+          await Utils.sleep(CONFIG.dynamicLoadDelay);
+
+          const modal = document.getElementById('lgcookieslaw_modal');
+          if (modal) {
+            // Untick all purpose toggles that aren't disabled
+            const purposeInputs = modal.querySelectorAll('input.lgcookieslaw-purpose');
+            for (const input of purposeInputs) {
+              if (!input.disabled && input.checked) {
+                input.click();
+                vendorsUnticked++;
+              }
+            }
+
+            // Click "Reject All" in the modal footer
+            const modalRejectBtn = modal.querySelector('.lgcookieslaw-reject-button');
+            if (modalRejectBtn) {
+              modalRejectBtn.click();
+              rejected++;
+            } else {
+              // Try "Save" / partial accept as last resort
+              const partialBtn = modal.querySelector('.lgcookieslaw-partial-accept-button');
+              if (partialBtn) {
+                partialBtn.click();
+                rejected++;
+              }
+            }
+          }
+        }
+
+        return { rejected, vendorsUnticked };
+      },
+    },
+
     // ──────────────── Generic (fallback) ────────────────────────
     generic: {
       detect() {
@@ -1605,20 +1668,31 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       if (this.initialized) return;
       this.initialized = true;
 
-      // Check if extension is enabled
-      const response = await this.sendMessage({ type: 'GET_STATUS' });
-      if (response && !response.enabled) return;
-
-      // Check if this site is whitelisted
-      const domain = this.getDomain();
-      const listCheck = await this.sendMessage({
-        type: 'CHECK_LIST',
-        domain: domain,
-      });
-      if (listCheck && listCheck.whitelisted) return;
-
-      // Start detection loop
+      // Start detection IMMEDIATELY -- do not wait for async status checks.
+      // Some banners appear very quickly after DOM ready, and the async
+      // sendMessage calls can delay the observer setup enough to miss them.
       this.detectAndReject();
+
+      // Check settings in the background (non-blocking)
+      this.sendMessage({ type: 'GET_STATUS' }).then((response) => {
+        if (response && !response.enabled) {
+          this.processed = true; // prevent any action
+          if (this.observerActive) {
+            this.observerActive = false;
+            this.observer.disconnect();
+          }
+        }
+      });
+
+      this.sendMessage({ type: 'CHECK_LIST', domain: this.getDomain() }).then((listCheck) => {
+        if (listCheck && listCheck.whitelisted) {
+          this.processed = true;
+          if (this.observerActive) {
+            this.observerActive = false;
+            this.observer.disconnect();
+          }
+        }
+      });
     },
 
     async detectAndReject() {

@@ -341,6 +341,14 @@
       loadLists(),
       loadSettings(),
     ]);
+
+    // Poll for updates while popup is open.
+    // This catches: (a) content script completing rejection after popup opened,
+    // (b) stats changing from other tabs, (c) status changes.
+    setInterval(() => {
+      loadCurrentSite();
+      loadStats();
+    }, 2000);
   }
 
   // Run when DOM is ready

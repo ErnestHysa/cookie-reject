@@ -6,7 +6,7 @@
   </p>
   <p align="center">
     <img src="https://img.shields.io/badge/platform-Chrome%20%7C%20Firefox%20%7C%20Edge%20%7C%20Brave%20%7C%20Opera%20%7C%20Safari-blue" alt="Platforms">
-    <img src="https://img.shields.io/badge/CMP_frameworks-15%2B-green" alt="CMP Frameworks">
+    <img src="https://img.shields.io/badge/CMP_frameworks-16%2B-green" alt="CMP Frameworks">
     <img src="https://img.shields.io/badge/zero_dependencies-yes-brightgreen" alt="No Dependencies">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
   </p>
@@ -162,6 +162,7 @@ CookieReject recognizes and handles 15+ consent management platforms plus a gene
 | Sirdata | Yes | Yes | No |
 | Ezoic (EzCookie) | Yes | Yes | No |
 | Borlabs Cookie | Yes | Yes | Yes |
+| LGCookiesLaw (PrestaShop) | Yes | Yes | Yes |
 | **Generic fallback** | **Yes** | **Yes** | **Yes** |
 
 *Sourcepoint uses cross-origin iframes; vendor unticking works when same-origin.

@@ -104,16 +104,32 @@
         <span class="status-dot whitelisted"></span>
         <span class="status-text">Whitelisted - cookies allowed</span>
       `;
+    } else if (listCheck && listCheck.blacklisted) {
+      $('#site-status').innerHTML = `
+        <span class="status-dot protected"></span>
+        <span class="status-text">Blacklisted - always rejecting</span>
+      `;
     } else if (contentStatus && contentStatus.processed) {
       $('#site-status').innerHTML = `
         <span class="status-dot protected"></span>
         <span class="status-text">Protected${contentStatus.cmp ? ' (' + contentStatus.cmp.name + ')' : ''}</span>
       `;
-    } else if (contentStatus && contentStatus.active) {
-      $('#site-status').innerHTML = `
-        <span class="status-dot processing"></span>
-        <span class="status-text">Processing...</span>
-      `;
+    } else if (contentStatus && contentStatus.active && !contentStatus.processed) {
+      // Content script is running but hasn't processed anything.
+      // This usually means no banner was detected -- don't show "Processing"
+      // unless the page just loaded (under 5 seconds).
+      const isRecent = contentStatus.timestamp && (Date.now() - contentStatus.timestamp < 5000);
+      if (isRecent) {
+        $('#site-status').innerHTML = `
+          <span class="status-dot processing"></span>
+          <span class="status-text">Processing...</span>
+        `;
+      } else {
+        $('#site-status').innerHTML = `
+          <span class="status-dot inactive"></span>
+          <span class="status-text">No banner detected</span>
+        `;
+      }
     } else {
       $('#site-status').innerHTML = `
         <span class="status-dot inactive"></span>

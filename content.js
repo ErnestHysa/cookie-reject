@@ -1495,6 +1495,7 @@
     processed: false,
     currentCMP: null,
     observer: null,
+    initTimestamp: Date.now(),
 
     async init() {
       if (this.initialized) return;
@@ -1653,6 +1654,7 @@
           processed: Engine.processed,
           cmp: Engine.currentCMP,
           domain: Engine.getDomain(),
+          timestamp: Engine.initTimestamp,
         });
       } else if (message.type === 'FORCE_REJECT') {
         Engine.processed = false;

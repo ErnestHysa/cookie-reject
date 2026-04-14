@@ -3,11 +3,6 @@
  * Handles all interactions in the browser extension popup.
  */
 
-// ─── Cross-Browser Polyfill Guard ─────────────────────────────────
-if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
-  var chrome = browser;
-}
-
 (function () {
   'use strict';
 
@@ -46,6 +41,21 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   function escapeHTML(str) {
     if (!str) return '';
     return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function renderActivityItems(entries) {
+    return entries.map(entry => `
+      <div class="activity-item">
+        <div>
+          <div class="activity-domain" title="${escapeHTML(entry.domain)}">${escapeHTML(entry.domain)}</div>
+          <div class="activity-meta">
+            <span class="activity-cmp">${escapeHTML(entry.cmp || 'Unknown')}</span>
+            ${entry.vendorsUnticked ? '<span class="activity-badge">' + escapeHTML(String(entry.vendorsUnticked)) + ' vendors</span>' : ''}
+          </div>
+        </div>
+        <span class="activity-time">${formatTimestamp(entry.timestamp)}</span>
+      </div>
+    `).join('');
   }
 
   function formatTimestamp(ts) {
@@ -228,11 +238,11 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   // Fix #23: pagination state
   let activityLimit = 30;
   let _allActivityEntries = [];
+  let _searchDebounce = null;
 
   async function loadActivity(loadMore = false) {
     if (!loadMore) {
       activityLimit = 30;
-      $('activitySearch').value = '';
       const log = await sendMessage({ type: 'GET_LOG', limit: 500 });
       _allActivityEntries = log || [];
     } else {
@@ -254,18 +264,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     }
 
     // Fix #22: show vendorsUnticked badge; background.js LOG_ACTION already stores it
-    container.innerHTML = visible.map(entry => `
-      <div class="activity-item">
-        <div>
-          <div class="activity-domain" title="${escapeHTML(entry.domain)}">${escapeHTML(entry.domain)}</div>
-          <div class="activity-meta">
-            <span class="activity-cmp">${escapeHTML(entry.cmp || 'Unknown')}</span>
-            ${entry.vendorsUnticked ? '<span class="activity-badge">' + entry.vendorsUnticked + ' vendors</span>' : ''}
-          </div>
-        </div>
-        <span class="activity-time">${formatTimestamp(entry.timestamp)}</span>
-      </div>
-    `).join('');
+    container.innerHTML = renderActivityItems(visible);
 
     // Fix #23: show/hide "Load more" button
     $('loadMoreBtn').style.display = filtered.length > activityLimit ? 'block' : 'none';
@@ -362,7 +361,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       if (action === 'remove-whitelist') {
         await sendMessage({ type: 'REMOVE_FROM_LIST', list: 'whitelist', domain: tabInfo.domain });
         $('whitelistBtn').textContent = 'Whitelist';
-        delete $('whitelistBtn').dataset.action;
+        $('whitelistBtn').removeAttribute('data-action');
         showToast('Removed from whitelist');
       } else {
         await sendMessage({ type: 'ADD_TO_LIST', list: 'whitelist', domain: tabInfo.domain });
@@ -419,6 +418,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         $('confirmCancel').removeEventListener('click', onCancel);
         document.removeEventListener('keydown', onEscape);
         $('confirmModal').removeEventListener('click', onOverlayClick);
+        document.removeEventListener('keydown', onTabTrap);
       };
 
       const onOk = () => { cleanup(); resolve(true); };
@@ -430,6 +430,26 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       $('confirmCancel').addEventListener('click', onCancel);
       document.addEventListener('keydown', onEscape);
       $('confirmModal').addEventListener('click', onOverlayClick);
+
+      // Focus trap -- keep Tab within modal while open (Fix #22)
+      const focusableSelector = 'button, [tabindex]:not([tabindex="-1"])';
+      const onTabTrap = (e) => {
+        if (e.key !== 'Tab') return;
+        const focusable = $('confirmModal').querySelectorAll(focusableSelector);
+        if (focusable.length === 0) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      };
+      document.addEventListener('keydown', onTabTrap);
+
+      $('confirmCancel').focus();
     });
   }
 
@@ -521,34 +541,25 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     // Fix #23: Load more activity entries
     $('loadMoreBtn').addEventListener('click', () => loadActivity(true));
 
-    // Activity search filter (Fix #13)
+    // Activity search filter (Fix #13, Fix #24: debounced)
     $('activitySearch').addEventListener('input', () => {
-      activityLimit = 30;
-      // Re-render from cached entries
-      const searchTerm = ($('activitySearch').value || '').trim().toLowerCase();
-      const filtered = searchTerm
-        ? _allActivityEntries.filter(e => (e.domain || '').toLowerCase().includes(searchTerm))
-        : _allActivityEntries;
-      const visible = filtered.slice(0, activityLimit);
-      const container = $('activityList');
-      if (visible.length === 0) {
-        container.innerHTML = '<div class="empty-state">' + (_allActivityEntries.length === 0 ? 'No activity yet' : 'No matches') + '</div>';
-        $('loadMoreBtn').style.display = 'none';
-        return;
-      }
-      container.innerHTML = visible.map(entry => `
-        <div class="activity-item">
-          <div>
-            <div class="activity-domain" title="${escapeHTML(entry.domain)}">${escapeHTML(entry.domain)}</div>
-            <div class="activity-meta">
-              <span class="activity-cmp">${escapeHTML(entry.cmp || 'Unknown')}</span>
-              ${entry.vendorsUnticked ? '<span class="activity-badge">' + entry.vendorsUnticked + ' vendors</span>' : ''}
-            </div>
-          </div>
-          <span class="activity-time">${formatTimestamp(entry.timestamp)}</span>
-        </div>
-      `).join('');
-      $('loadMoreBtn').style.display = filtered.length > activityLimit ? 'block' : 'none';
+      clearTimeout(_searchDebounce);
+      _searchDebounce = setTimeout(() => {
+        activityLimit = 30;
+        const searchTerm = ($('activitySearch').value || '').trim().toLowerCase();
+        const filtered = searchTerm
+          ? _allActivityEntries.filter(e => (e.domain || '').toLowerCase().includes(searchTerm))
+          : _allActivityEntries;
+        const visible = filtered.slice(0, activityLimit);
+        const container = $('activityList');
+        if (visible.length === 0) {
+          container.innerHTML = '<div class="empty-state">' + (_allActivityEntries.length === 0 ? 'No activity yet' : 'No matches') + '</div>';
+          $('loadMoreBtn').style.display = 'none';
+          return;
+        }
+        container.innerHTML = renderActivityItems(visible);
+        $('loadMoreBtn').style.display = filtered.length > activityLimit ? 'block' : 'none';
+      }, 150);
     });
   }
 

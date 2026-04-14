@@ -25,14 +25,14 @@
 
     <!-- Tab Bar -->
     <nav class="tab-bar" role="tablist">
-      <button class="tab active" data-tab="dashboard">Dashboard</button>
-      <button class="tab" data-tab="activity">Activity</button>
-      <button class="tab" data-tab="lists">Lists</button>
-      <button class="tab" data-tab="settings">Settings</button>
+      <button class="tab active" id="tab-btn-dashboard" data-tab="dashboard">Dashboard</button>
+      <button class="tab" id="tab-btn-activity" data-tab="activity">Activity</button>
+      <button class="tab" id="tab-btn-lists" data-tab="lists">Lists</button>
+      <button class="tab" id="tab-btn-settings" data-tab="settings">Settings</button>
     </nav>
 
     <!-- Dashboard Tab -->
-    <div class="tab-content active" id="tab-dashboard">
+    <div class="tab-content active" role="tabpanel" aria-labelledby="tab-btn-dashboard" id="tab-dashboard">
       <!-- Current Site Card -->
       <div class="card site-card">
         <div class="site-domain" id="siteDomain">Loading...</div>
@@ -68,12 +68,12 @@
     </div>
 
     <!-- Activity Tab -->
-    <div class="tab-content" id="tab-activity">
+    <div class="tab-content" role="tabpanel" aria-labelledby="tab-btn-activity" id="tab-activity">
       <div class="activity-header">
         <h3>Recent Activity</h3>
         <button class="btn btn-sm btn-outline" id="clearLogBtn">Clear</button>
       </div>
-      <input type="text" id="activitySearch" placeholder="Filter by domain..." class="input activity-search">
+      <input type="text" id="activitySearch" placeholder="Filter by domain..." class="input activity-search" aria-label="Filter activity by domain name">
       <div class="activity-list" id="activityList">
         <div class="empty-state">No activity yet</div>
       </div>
@@ -82,7 +82,7 @@
     </div>
 
     <!-- Lists Tab -->
-    <div class="tab-content" id="tab-lists">
+    <div class="tab-content" role="tabpanel" aria-labelledby="tab-btn-lists" id="tab-lists">
       <div class="list-section">
         <h3>Whitelist <span class="badge" id="whitelistCount">0</span></h3>
         <p class="list-desc">Sites where CookieReject will NOT run</p>
@@ -112,7 +112,7 @@
     </div>
 
     <!-- Settings Tab -->
-    <div class="tab-content" id="tab-settings">
+    <div class="tab-content" role="tabpanel" aria-labelledby="tab-btn-settings" id="tab-settings">
       <div class="setting-group">
         <h3>Rejection</h3>
         <div class="setting-item">

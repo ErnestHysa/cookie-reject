@@ -189,6 +189,9 @@
     },
   };
 
+  // Simple promise queue to serialize storage read-modify-write operations
+  const _storageQueue = Promise.resolve();
+
   // ─── Stats Management ───────────────────────────────────────────────
   const StatsManager = {
     async get() {
@@ -209,12 +212,14 @@
     },
 
     async increment(fields) {
-      const stats = await this.get();
-      for (const [key, amount] of Object.entries(fields)) {
-        stats[key] = (stats[key] || 0) + amount;
-      }
-      await Storage.set(STORAGE_KEYS.STATS, stats);
-      return stats;
+      return _storageQueue = _storageQueue.then(async () => {
+        const stats = await this.get();
+        for (const [key, amount] of Object.entries(fields)) {
+          stats[key] = (stats[key] || 0) + amount;
+        }
+        await Storage.set(STORAGE_KEYS.STATS, stats);
+        return stats;
+      }).catch(e => console.error('Storage operation failed:', e));
     },
 
     async reset() {
@@ -251,19 +256,21 @@
     _idCounter: 0,
 
     async add(entry) {
-      const log = await Storage.get(STORAGE_KEYS.LOG, []);
+      return _storageQueue = _storageQueue.then(async () => {
+        const log = await Storage.get(STORAGE_KEYS.LOG, []);
 
-      log.unshift({
-        id: `${Date.now()}-${++LogManager._idCounter}`,
-        ...entry,
-      });
+        log.unshift({
+          id: `${Date.now()}-${++LogManager._idCounter}`,
+          ...entry,
+        });
 
-      if (log.length > MAX_LOG_ENTRIES) {
-        log.length = MAX_LOG_ENTRIES;
-      }
+        if (log.length > MAX_LOG_ENTRIES) {
+          log.length = MAX_LOG_ENTRIES;
+        }
 
-      await Storage.set(STORAGE_KEYS.LOG, log);
-      return log;
+        await Storage.set(STORAGE_KEYS.LOG, log);
+        return log;
+      }).catch(e => console.error('Storage operation failed:', e));
     },
 
     async get(limit = 50, offset = 0) {
@@ -290,6 +297,10 @@
   const ListManager = {
     extractBaseDomain(hostname) {
       if (!hostname) return '';
+      // Handle IP addresses (v4 and v6) -- return as-is
+      if (/^[\d.:]+$/.test(hostname) || hostname === 'localhost') {
+        return hostname;
+      }
       const parts = hostname.split('.');
       if (parts.length <= 2) return hostname;
 
@@ -351,10 +362,15 @@
     },
 
     async removeEntry(listName, domain) {
-      const list = await this.getList(listName);
-      const filtered = list.filter(entry => !this.domainMatches(domain, entry.domain));
-      await this.setList(listName, filtered);
-      return true;
+      const storageKey = listName === 'whitelist' ? STORAGE_KEYS.WHITELIST : STORAGE_KEYS.BLACKLIST;
+      let list = await this.getList(listName);
+      const before = list.length;
+      list = list.filter(e => !this.domainMatches(domain, e.domain));
+      if (list.length < before) {
+        await Storage.set(storageKey, list);
+        return true;
+      }
+      return false;
     },
 
     async checkDomain(domain) {
@@ -405,13 +421,15 @@
     },
 
     async add(domain) {
-      const domains = await Storage.get(STORAGE_KEYS.UNIQUE_DOMAINS, []);
-      if (!domains.includes(domain)) {
-        domains.push(domain);
-        await Storage.set(STORAGE_KEYS.UNIQUE_DOMAINS, domains);
-        return true;
-      }
-      return false;
+      return _storageQueue = _storageQueue.then(async () => {
+        const domains = await Storage.get(STORAGE_KEYS.UNIQUE_DOMAINS, []);
+        if (!domains.includes(domain)) {
+          domains.push(domain);
+          await Storage.set(STORAGE_KEYS.UNIQUE_DOMAINS, domains);
+          return true;
+        }
+        return false;
+      }).catch(e => console.error('Storage operation failed:', e));
     },
 
     async count() {
@@ -474,7 +492,7 @@
         return { valid: true, sanitizedValue: sanitized };
       }
 
-      // cr_whitelist / cr_blacklist: arrays of objects with domain (string) and timestamp (number)
+      // cr_whitelist / cr_blacklist: arrays of objects with domain (string) and addedAt (number)
       if (key === STORAGE_KEYS.WHITELIST || key === STORAGE_KEYS.BLACKLIST) {
         if (!Array.isArray(value)) {
           return { valid: false, sanitizedValue: null };
@@ -482,7 +500,7 @@
         const sanitized = value.filter(entry => {
           if (!entry || typeof entry !== 'object') return false;
           if (typeof entry.domain !== 'string') return false;
-          if (typeof entry.timestamp !== 'number') return false;
+          if (typeof entry.addedAt !== 'number') return false;
           return true;
         });
         return { valid: true, sanitizedValue: sanitized };
@@ -752,7 +770,10 @@
       }
     };
 
-    handle().then(sendResponse);
+    handle().then(sendResponse).catch(e => {
+      console.error('Message handler error:', e);
+      sendResponse({ error: e.message });
+    });
     return true;
   });
 
@@ -798,7 +819,7 @@
   });
 
   // ─── Initialize ─────────────────────────────────────────────────────
-  Migration.run();
-  Badge.update();
-  loadDebugMode();
+  Migration.run().catch(e => console.error('Migration failed:', e));
+  Badge.update().catch(e => console.error('Badge update failed:', e));
+  loadDebugMode().catch(e => console.error('Debug mode load failed:', e));
 })();

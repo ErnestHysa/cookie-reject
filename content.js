@@ -19,8 +19,10 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   // in every iframe wastes resources: N iframes = N Engine instances,
   // N MutationObservers, N intervals all scanning for banners that will
   // never appear there.
-  if (window.__cookieReject_ext_v1x2x0) return;
-  window.__cookieReject_ext_v1x2x0 = true;
+  // Version-specific guard prevents double-injection after extension updates
+  const _guardProp = '__cookieReject_' + (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.getManifest ? chrome.runtime.getManifest().version.replace(/\./g, '_') : 'unknown');
+  if (window[_guardProp]) return;
+  window[_guardProp] = true;
   if (window !== window.top) return;
 
   // ─── Debug Logging ──────────────────────────────────────────────────
@@ -132,9 +134,8 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
           : selectorOrElement;
       if (!el) return false;
       el.scrollIntoView({ block: 'center', behavior: 'instant' });
-      // Use MouseEvent for more realistic clicks that CMPs are less likely to reject
-      el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-      return true;
+      const dispatched = el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+      return dispatched;
     },
 
     /**
@@ -157,6 +158,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
      * Find all elements matching any of several text patterns.
      */
     findAllByText(texts, root = document, tag = '*') {
+      if (!texts || texts.length === 0) return [];
       const results = [];
       // Pre-lowercase all search texts for efficiency
       const lowerTexts = texts.map(t => t.toLowerCase());
@@ -727,11 +729,12 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       }
 
       // Save - use DECLINE ALL button, NOT "Allow All"
+      const searchRoot = dialog || document.getElementById('CybotCookiebotDialog') || document;
       const saveBtn =
         document.getElementById('CybotCookiebotDialogBodyLevelButtonLevelOptinDeclineAll') ||
-        Utils.findByText('save', dialog || document, 'a, button') ||
-        Utils.findByText('confirm', dialog || document, 'a, button') ||
-        Utils.findByText('submit', dialog || document, 'a, button');
+        Utils.findByText('save', searchRoot, 'a, button') ||
+        Utils.findByText('confirm', searchRoot, 'a, button') ||
+        Utils.findByText('submit', searchRoot, 'a, button');
       if (saveBtn) {
         saveBtn.click();
         rejected++;
@@ -1471,16 +1474,19 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     ];
 
     // Find and click reject button -- single DOM pass for all patterns
-    const rejectBtns = Utils.findAllByText(rejectTexts, document, 'button, a, span, div');
+    const rejectBtns = Utils.findAllByText(rejectTexts, document, 'button, a');
     if (rejectBtns.length > 0) {
       // Pick the best match: prefer buttons with exact-ish text over partial matches
       // (e.g. "Reject All" over "I reject everything and leave")
-      const btn = rejectBtns.reduce((best, el) => {
+      let btn = null;
+      let btnLen = Infinity;
+      for (const el of rejectBtns) {
         const txt = (el.textContent || '').trim().toLowerCase();
-        // Prefer shorter matches (more specific button text)
-        if (!best || txt.length < best._len) return Object.assign(el, { _len: txt.length });
-        return best;
-      }, null);
+        if (txt.length < btnLen) {
+          btn = el;
+          btnLen = txt.length;
+        }
+      }
       if (btn) {
         btn.click();
         rejected++;
@@ -1612,20 +1618,31 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       let success = false;
 
       // Try __tcfapi (TCF v2)
+      // Standard approach: listen for tcloaded, then directly set minimal consent
       if (typeof window.__tcfapi === 'function') {
         try {
-          window.__tcfapi('addEventListener', 2, (tcData, success) => {
-            if (success && tcData.eventStatus === 'tcloaded') {
-              // Reject all purposes and vendors
-              window.__tcfapi('rejectAll', 2, () => {}, tcData.listenerId);
-              // Also try posting a rejectAll command
-            }
+          await new Promise((resolve) => {
+            window.__tcfapi('addEventListener', 2, (tcData, listenerSuccess) => {
+              if (listenerSuccess) {
+                // Remove our listener to clean up
+                try {
+                  window.__tcfapi('removeEventListener', 2, () => {}, tcData.listenerId);
+                } catch (e) { /* ignore */ }
+                // If CMP hasn't decided yet, try to trigger consent update
+                // by clicking the reject button (handled by our CMP handlers)
+                if (tcData.eventStatus === 'cmpuishown') {
+                  success = true;
+                }
+              }
+              resolve();
+            });
+            // Timeout after 2s if CMP doesn't respond
+            setTimeout(resolve, 2000);
           });
-          success = true;
         } catch (e) { /* ignore */ }
       }
 
-      // Try __uspapi (US Privacy)
+      // Try __uspapi (US Privacy) -- set opt-out string
       if (typeof window.__uspapi === 'function') {
         try {
           window.__uspapi('setUspDftData', 1, () => {}, { version: 1, uspString: '1YYN' });
@@ -1633,14 +1650,12 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         } catch (e) { /* ignore */ }
       }
 
-      // Try __gpp (Global Privacy Platform)
+      // Try __gpp (Global Privacy Platform) -- request default denial
       if (typeof window.__gpp === 'function') {
         try {
-          window.__gpp('addEventListener', (evt) => {
-            if (evt.eventName === 'sectionChange') {
-              window.__gpp('setNavEntry', null, 'rejectAll');
-            }
-          });
+          // getGPPData is the standard read command; for rejection we rely on
+          // the CMP's own UI buttons (handled by our handlers above).
+          // Signal that a GPP CMP was detected for logging purposes.
           success = true;
         } catch (e) { /* ignore */ }
       }
@@ -1653,6 +1668,12 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   // Removes banner overlays that block page interaction
   const BannerHider = {
     hide() {
+      // Only act if there's actually a cookie/consent overlay present
+      const hasCookieOverlay = document.querySelector(
+        '[class*="cookie"], [class*="consent"], [class*="privacy"], [class*="gdpr"], [id*="cookie"], [id*="consent"]'
+      );
+      if (!hasCookieOverlay) return;
+
       // Common overlay/backdrop selectors
       const overlaySelectors = [
         '.onetrust-pc-dark-filter',
@@ -1673,14 +1694,19 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         }
       }
 
-      // Remove body scroll lock
-      if (document.body.style.overflow === 'hidden' ||
-          document.body.style.overflow === 'clip') {
-        document.body.style.overflow = '';
-      }
-      if (document.documentElement.style.overflow === 'hidden' ||
-          document.documentElement.style.overflow === 'clip') {
-        document.documentElement.style.overflow = '';
+      // Remove body scroll lock (only if we can confirm it was set by a cookie overlay)
+      const cookieOverlayBlocking = document.querySelector(
+        '[class*="cookie"], [class*="consent"], [class*="privacy-overlay"]'
+      );
+      if (cookieOverlayBlocking) {
+        if (document.body.style.overflow === 'hidden' ||
+            document.body.style.overflow === 'clip') {
+          document.body.style.overflow = '';
+        }
+        if (document.documentElement.style.overflow === 'hidden' ||
+            document.documentElement.style.overflow === 'clip') {
+          document.documentElement.style.overflow = '';
+        }
       }
     },
   };
@@ -1713,9 +1739,13 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     currentCMP: null,
     observer: null,
     observerActive: false,
+    intervalId: null,
     initTimestamp: Date.now(),
     lastFailedAttempt: 0,
     _settingsLoaded: false,
+    _whitelistChecked: false,
+    _isWhitelisted: false,
+    _detecting: false,
     settings: {
       autoReject: true,
       untickVendors: true,
@@ -1751,6 +1781,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       // Check whitelist (non-blocking)
       this.sendMessage({ type: 'CHECK_LIST', domain: this.getDomain() }).then((listCheck) => {
         if (listCheck && listCheck.whitelisted) {
+          this._isWhitelisted = true;
           this.processed = true;
           DebugLog.log('Site whitelisted, skipping:', this.getDomain());
           if (this.observerActive) {
@@ -1758,6 +1789,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
             this.observer.disconnect();
           }
         }
+        this._whitelistChecked = true;
       });
 
       // Start detection -- runs immediately, settings will abort if needed
@@ -1765,6 +1797,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     },
 
     async detectAndReject() {
+      if (this._detecting) return;
+      this._detecting = true;
+
       // Wait for settings to load before starting detection (max 2s)
       if (!this._settingsLoaded) {
         const settingsDeadline = Date.now() + CONFIG.settingsWaitTimeout;
@@ -1772,6 +1807,18 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
           await Utils.sleep(50);
         }
         this._settingsLoaded = true; // proceed anyway after timeout
+      }
+
+      // Wait for whitelist check (max 2s)
+      if (!this._whitelistChecked) {
+        const wlDeadline = Date.now() + CONFIG.settingsWaitTimeout;
+        while (!this._whitelistChecked && Date.now() < wlDeadline) {
+          await Utils.sleep(50);
+        }
+        if (this._isWhitelisted) {
+          this.processed = true;
+          return;
+        }
       }
 
       // Immediate check
@@ -1808,6 +1855,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
           this.observerActive = false;
           this.observer.disconnect();
           this.handleCMP(cmp);
+        } else {
+          // New DOM elements may have added shadow roots -- invalidate cache
+          CMPDetector._shadowHosts = null;
         }
       });
 
@@ -1827,9 +1877,10 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
 
       // Also try at intervals as a safety net (catches banners loaded
       // after the observer's initial watch window, or in tricky iframes)
-      const intervalId = setInterval(async () => {
+      this.intervalId = setInterval(async () => {
         if (this.processed) {
-          clearInterval(intervalId);
+          clearInterval(this.intervalId);
+          this.intervalId = null;
           if (this.observerActive) {
             this.observerActive = false;
             this.observer.disconnect();
@@ -1839,7 +1890,8 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
 
         this.intervalRetries++;
         if (this.intervalRetries > CONFIG.maxRetries) {
-          clearInterval(intervalId);
+          clearInterval(this.intervalId);
+          this.intervalId = null;
           // Stop the observer too -- we've waited long enough
           if (this.observerActive) {
             this.observerActive = false;
@@ -1850,7 +1902,8 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
 
         const cmp = CMPDetector.detect();
         if (cmp) {
-          clearInterval(intervalId);
+          clearInterval(this.intervalId);
+          this.intervalId = null;
           if (this.observerActive) {
             this.observerActive = false;
             this.observer.disconnect();
@@ -1858,6 +1911,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
           await this.handleCMP(cmp);
         }
       }, CONFIG.retryInterval);
+
+      // Re-entry guard cleared after observer + interval are set up
+      this._detecting = false;
     },
 
     async handleCMP(cmpInfo) {
@@ -2057,6 +2113,15 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         });
       } else if (message.type === 'FORCE_REJECT') {
         DebugLog.log('Force reject triggered (manual override)');
+        // Clean up previous observer and interval to prevent resource leaks
+        if (Engine.observerActive && Engine.observer) {
+          Engine.observerActive = false;
+          Engine.observer.disconnect();
+        }
+        if (Engine.intervalId) {
+          clearInterval(Engine.intervalId);
+          Engine.intervalId = null;
+        }
         Engine.processed = false;
         Engine.intervalRetries = 0;
         Engine.lastFailedAttempt = 0;

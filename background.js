@@ -337,6 +337,9 @@
         }
 
         case 'ADD_TO_LIST': {
+          // Remove from the opposite list first (transfer, not duplicate)
+          const oppositeList = message.list === 'whitelist' ? 'blacklist' : 'whitelist';
+          await ListManager.removeEntry(oppositeList, message.domain);
           const added = await ListManager.addEntry(message.list, message.domain);
           return { success: added };
         }

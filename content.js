@@ -127,7 +127,17 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         scrollContainer = null,
       } = opts;
 
-      const toggles = container.querySelectorAll(toggleSelector);
+      // Collect toggles from light DOM
+      let toggles = Array.from(container.querySelectorAll(toggleSelector));
+
+      // Also pierce Shadow DOM (custom web components like <xtx-checkbox>)
+      container.querySelectorAll('*').forEach(el => {
+        if (el.shadowRoot) {
+          const shadowToggles = el.shadowRoot.querySelectorAll(toggleSelector);
+          shadowToggles.forEach(t => toggles.push(t));
+        }
+      });
+
       let count = 0;
 
       for (let i = 0; i < toggles.length && i < CONFIG.maxVendors; i++) {
@@ -255,6 +265,11 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         '[role="dialog"][class*="privacy"]',
         // Fixed position banners (common for cookie popups)
         'div[style*="position: fixed"][class*="cookie"]',
+        // Custom/proprietary cookie overlays
+        '[class*="privacy-cookie"]',
+        '[id*="CookiePolicy"]',
+        '[class*="cookie-overlay"]',
+        '[class*="cookie-policy"]',
       ];
 
       for (const sel of bannerIndicators) {
@@ -1318,6 +1333,22 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
           'continue without accepting', 'manage choices',
           'necessary cookies only', 'strictly necessary only',
           'accept only essential', 'accept required',
+          // German
+          'ablehnen', 'alle ablehnen', 'nur notwendige',
+          'nur erforderliche', 'notwendige cookies',
+          'alle ablehnen', 'ablehnen alle',
+          'nicht akzeptieren', 'nicht zustimmen',
+          'notwendig akzeptieren',
+          // French
+          'tout refuser', 'refuser', 'refuser tout',
+          'seulement nécessaires', 'cookies nécessaires',
+          // Spanish
+          'rechazar todo', 'rechazar', 'solo necesarias',
+          'solo cookies necesarias',
+          // Italian
+          'rifiuta tutto', 'rifiuta', 'solo necessari',
+          // Dutch
+          'weiger alles', 'weigeren', 'alleen noodzakelijk',
         ];
 
         // Common manage/preferences text patterns
@@ -1327,6 +1358,16 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
           'more information', 'customise', 'customize',
           'learn more', 'view preferences', 'edit preferences',
           'change settings', 'choose cookies', 'preferences',
+          // German
+          'datenschutzeinstellungen', 'cookie-einstellungen',
+          'eigene einstellungen', 'einstellungen verwalten',
+          'cookie einstellungen', 'weitere informationen',
+          // French
+          'paramètres des cookies', 'gérer les cookies',
+          'personnaliser', 'paramètres de confidentialité',
+          // Spanish
+          'configuración de cookies', 'gestionar cookies',
+          'configurar', 'ajustes de privacidad',
         ];
 
         // Common save/confirm text patterns
@@ -1335,6 +1376,20 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
           'save my choices', 'save your choices', 'save',
           'confirm choices', 'confirm my choices', 'confirm',
           'update preferences', 'apply',
+          // German
+          'auswahl übernehmen', 'auswahl speichern',
+          'einstellungen speichern', 'speichern', 'bestätigen',
+          'auswahl bestätigen', 'übernehmen',
+          // French
+          'enregistrer', 'confirmer', 'valider',
+          'sauvegarder les choix', 'enregistrer les préférences',
+          // Spanish
+          'guardar', 'confirmar', 'guardar preferencias',
+          'guardar selección',
+          // Italian
+          'salva', 'conferma', 'salva preferenze',
+          // Dutch
+          'opslaan', 'bevestigen', 'voorkeuren opslaan',
         ];
 
         // Find and click reject button first
@@ -1344,6 +1399,47 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
             btn.click();
             rejected++;
             return { rejected, vendorsUnticked };
+          }
+        }
+
+        // Strategy 2: Banner already shows checkboxes and a save/confirm button.
+        // This handles custom cookie overlays (e.g. thomas-krenn.com, many German
+        // sites) where the banner presents category toggles directly with a
+        // "save selection" button, no reject-all button, and no preferences screen.
+        {
+          // Find cookie/privacy overlays (fixed position or modal)
+          const cookieOverlays = document.querySelectorAll(
+            '[class*="privacy-cookie"], [class*="cookie-overlay"], ' +
+            '[class*="cookie-consent"], [class*="cookie-banner"], ' +
+            '[id*="CookiePolicy"], [role="dialog"]'
+          );
+          for (const overlay of cookieOverlays) {
+            // Untick all non-essential toggles in this overlay
+            const unticked = await Utils.untickAllToggles(overlay);
+            if (unticked > 0) {
+              vendorsUnticked += unticked;
+            }
+
+            // Try to find a save/confirm button
+            for (const sText of saveTexts) {
+              const sBtn = Utils.findByText(sText, overlay, 'button, a');
+              if (sBtn) {
+                sBtn.click();
+                rejected++;
+                return { rejected, vendorsUnticked };
+              }
+            }
+
+            // Also try data-attribute based save buttons (common in custom CMPs)
+            const attrSaveBtn = overlay.querySelector(
+              '[data-cookie-overlay-save], [data-cookie-save], ' +
+              '[data-consent-save], [data-save-settings]'
+            );
+            if (attrSaveBtn) {
+              attrSaveBtn.click();
+              rejected++;
+              return { rejected, vendorsUnticked };
+            }
           }
         }
 

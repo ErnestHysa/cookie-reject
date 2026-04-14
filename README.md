@@ -10,6 +10,14 @@ Cookie consent banners are everywhere. Most of them have a tiny "Reject All" but
 [![Browser Support](https://img.shields.io/badge/browsers-Chrome%20%7C%20Firefox%20%7C%20Edge%20%7C%20Safari-blue)](#install)
 [![License: MIT](https://img.shields.io/badge/license-MIT-brightgreen)](LICENSE)
 
+## Screenshots
+
+> Screenshots coming soon. The extension features a dark-themed popup with 4 tabs:
+> - **Dashboard**: Current site status, quick stats, reject now button
+> - **Activity**: Log of all rejected sites with CMP identification
+> - **Lists**: Whitelist and blacklist management
+> - **Settings**: Toggle switches for auto-reject, vendor unticking, overlay dismissal, TCF API, and debug mode
+
 ## Install
 
 ### Chrome / Edge / Brave / Opera
@@ -20,10 +28,17 @@ Cookie consent banners are everywhere. Most of them have a tiny "Reject All" but
 5. Done! The icon appears in your toolbar.
 
 ### Firefox
-1. Go to `about:debugging#/runtime/this-firefox`
-2. Click **Load Temporary Add-on**
-3. Select `manifest.json` from this folder
-4. Done! (Requires Firefox 126+ for Manifest V3 support)
+
+1. Open `about:debugging#/runtime/this-firefox` in Firefox
+2. Click **"Load Temporary Add-on..."**
+3. Select any file in the extension directory (e.g., `manifest.json`)
+4. The extension is now active (temporary -- removed on browser restart)
+
+**For permanent installation:**
+1. Package as XPI: `zip -r cookiereject.xpi manifest.json content.js background.js popup/ icons/ browser-polyfill.js`
+2. Sign the XPI at [addons.mozilla.org/developers](https://addons.mozilla.org/developers/)
+3. Install the signed XPI via `about:addons` → "Install Add-on From File"
+4. Note: Firefox minimum version 126 (set in manifest.json `browser_specific_settings.gecko.strict_min_version`)
 
 ### Safari (macOS)
 Requires Xcode to build a Safari Web Extension wrapper. See [Apple's guide](https://developer.apple.com/documentation/safariservices/creating-a-safari-web-extension).

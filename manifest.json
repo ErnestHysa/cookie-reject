@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "CookieReject",
   "short_name": "CookieReject",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Auto-reject cookies, vendor consents, and privacy popups. Saves you time by unticking every vendor toggle so you don't have to.",
 
   "browser_specific_settings": {

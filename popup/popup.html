@@ -76,6 +76,8 @@
       <div class="activity-list" id="activityList">
         <div class="empty-state">No activity yet</div>
       </div>
+      <!-- Fix #23: Load more button for pagination -->
+      <button class="btn btn-outline btn-sm" id="loadMoreBtn" style="display:none; width: 100%; margin-top: 8px;">Load More</button>
     </div>
 
     <!-- Lists Tab -->
@@ -186,5 +188,16 @@
 
   <script src="../browser-polyfill.js"></script>
   <script src="popup.js"></script>
+
+  <!-- Fix #21: Themed confirm dialog for reset stats -->
+  <div class="modal-overlay" id="confirmModal">
+    <div class="modal-box">
+      <div class="modal-message" id="confirmMessage">Reset all statistics and activity? This cannot be undone.</div>
+      <div class="modal-actions">
+        <button class="btn btn-outline btn-sm" id="confirmCancel">Cancel</button>
+        <button class="btn btn-danger btn-sm" id="confirmOk">Reset</button>
+      </div>
+    </div>
+  </div>
 </body>
 </html>

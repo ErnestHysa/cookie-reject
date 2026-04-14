@@ -46,8 +46,16 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     scrollDelay: 300,
     // Max vendors to process per CMP (safety limit)
     maxVendors: 2000,
-    // Average time saved per site (seconds) - used for stats
-    avgTimeSavedPerSite: 47,
+    // Observer throttle: minimum ms between detect() calls via MutationObserver
+    observerThrottle: 300,
+    // Cooldown after a failed rejection attempt (ms)
+    failedCooldown: 3000,
+    // Delay before calling handler.reject() to let banner JS initialize (ms)
+    preRejectDelay: 800,
+    // Safety timeout: force-disconnect observer after this many ms
+    observerTimeout: 35000,
+    // Max time to wait for settings to load before proceeding (ms)
+    settingsWaitTimeout: 2000,
   };
 
   // ─── Utility helpers ────────────────────────────────────────────────
@@ -59,12 +67,22 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
      */
     isVisible(el) {
       if (!el) return false;
+      // Cheap check: if offsetParent exists, element is definitely visible
+      // (offsetParent is null only for display:none or position:fixed)
+      if (el.offsetParent !== null) return true;
+      // offsetParent is null -- could be display:none or position:fixed
       const style = getComputedStyle(el);
       if (style.display === 'none') return false;
       if (style.visibility === 'hidden') return false;
       if (parseFloat(style.opacity) === 0) return false;
       const rect = el.getBoundingClientRect();
       if (rect.width === 0 && rect.height === 0) return false;
+      // Check if element is positioned far off-screen
+      const viewWidth = window.innerWidth || document.documentElement.clientWidth;
+      const viewHeight = window.innerHeight || document.documentElement.clientHeight;
+      if (rect.right < -100 || rect.bottom < -100 || rect.left > viewWidth + 100 || rect.top > viewHeight + 100) {
+        return false;
+      }
       return true;
     },
 
@@ -137,11 +155,16 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
      */
     findAllByText(texts, root = document, tag = '*') {
       const results = [];
+      // Pre-lowercase all search texts for efficiency
+      const lowerTexts = texts.map(t => t.toLowerCase());
+      const minLen = Math.min(...lowerTexts.map(t => t.length));
       const elements = root.querySelectorAll(tag);
       for (const el of elements) {
+        if (!this.isVisible(el)) continue;
         const txt = (el.textContent || '').trim().toLowerCase();
-        for (const t of texts) {
-          if (txt.includes(t.toLowerCase())) {
+        if (txt.length < minLen) continue; // can't match any text
+        for (const t of lowerTexts) {
+          if (txt.includes(t)) {
             results.push(el);
             break;
           }
@@ -235,11 +258,21 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
 
   // ─── CMP Detection ──────────────────────────────────────────────────
   const CMPDetector = {
+    // Detection result cache: avoids re-running expensive querySelectorAll
+    // when detect() is called multiple times within a short window.
+    _lastDetection: null,
+    _lastDetectionTime: 0,
+    _cacheTTL: 1000, // 1 second
+
     /**
      * Detect which CMP framework is running on the current page.
      * Returns an object { id, name } or null.
      */
     detect() {
+      const now = Date.now();
+      if (this._lastDetection && (now - this._lastDetectionTime < this._cacheTTL)) {
+        return this._lastDetection;
+      }
       const detectors = [
         { id: 'onetrust', name: 'OneTrust', check: () => document.getElementById('onetrust-banner-sdk') || document.getElementById('onetrust-consent-sdk') || window.OneTrust || window.OptanonActiveGroups },
         { id: 'fides', name: 'Fides', check: () => document.getElementById('fides-banner-container') || document.getElementById('fides-banner') },
@@ -271,16 +304,24 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
             if (result instanceof HTMLElement && !Utils.isVisible(result)) {
               continue;
             }
-            return { id: detector.id, name: detector.name };
+            const cached = { id: detector.id, name: detector.name };
+            this._lastDetection = cached;
+            this._lastDetectionTime = now;
+            return cached;
           }
         } catch (e) { /* skip */ }
       }
 
       // Fallback: generic detection based on common banner patterns
       if (CMPDetector.detectGeneric()) {
-        return { id: 'generic', name: 'Generic' };
+        const cached = { id: 'generic', name: 'Generic' };
+        this._lastDetection = cached;
+        this._lastDetectionTime = now;
+        return cached;
       }
 
+      this._lastDetection = null;
+      this._lastDetectionTime = now;
       return null;
     },
 
@@ -290,7 +331,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     detectGeneric() {
       const bannerIndicators = [
         // Common cookie banner IDs
-        '[id*="cookie-banner"]', '[id*="cookie-banner"]',
+        '[id*="cookie-banner"]',
         '[id*="cookie-notice"]', '[id*="cookie-consent"]',
         '[id*="cookie-popup"]', '[id*="consent-banner"]',
         '[id*="gdpr-banner"]', '[id*="gdpr-notice"]',
@@ -320,6 +361,17 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         const el = document.querySelector(sel);
         if (el && Utils.isVisible(el)) return true;
       }
+
+      // Also check inside Shadow DOMs
+      const hosts = document.querySelectorAll('*');
+      for (const host of hosts) {
+        if (!host.shadowRoot) continue;
+        for (const sel of bannerIndicators) {
+          const el = host.shadowRoot.querySelector(sel);
+          if (el && Utils.isVisible(el)) return true;
+        }
+      }
+
       return false;
     },
   };
@@ -328,1295 +380,1207 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   // Each handler implements:
   //   detect()  → boolean
   //   reject()  → Promise<{ rejected: number, vendorsUnticked: number }>
+  //
+  // Handlers are registered via registerHandler() for easy future
+  // modularization. New CMPs can be added by calling
+  // registerHandler(id, name, detectFn, rejectFn).
 
-  const CMPHandlers = {
+  const CMPHandlers = {};
 
-    // ──────────────── OneTrust ────────────────────────
-    onetrust: {
-      detect() {
-        return !!(
-          document.getElementById('onetrust-banner-sdk') ||
-          document.getElementById('onetrust-consent-sdk') ||
-          window.OneTrust
-        );
-      },
-
+  function registerHandler(id, name, detect, reject) {
+    CMPHandlers[id] = {
+      detect,
       async reject() {
-        let rejected = 0;
-        let vendorsUnticked = 0;
+        try {
+          return await reject();
+        } catch (e) {
+          DebugLog.error(`Handler ${id} error:`, e.message);
+          return { rejected: 0, vendorsUnticked: 0 };
+        }
+      },
+    };
+  }
 
-        // Strategy 1: Click "Reject All" directly
-        const rejectBtn = document.getElementById('onetrust-reject-all-handler');
-        if (rejectBtn) {
-          rejectBtn.click();
+  // ──────────────── OneTrust ────────────────────────
+  registerHandler('onetrust', 'OneTrust', function detect() {
+    return !!(
+      document.getElementById('onetrust-banner-sdk') ||
+      document.getElementById('onetrust-consent-sdk') ||
+      window.OneTrust
+    );
+  }, async function reject() {
+    let rejected = 0;
+    let vendorsUnticked = 0;
+
+    // Strategy 1: Click "Reject All" directly
+    const rejectBtn = document.getElementById('onetrust-reject-all-handler');
+    if (rejectBtn) {
+      rejectBtn.click();
+      rejected++;
+      return { rejected, vendorsUnticked };
+    }
+
+    // Strategy 2: Open preferences, untick everything, save
+    const prefsBtn =
+      document.getElementById('onetrust-pc-btn-handler') ||
+      document.querySelector('.ot-pc-btn-handler');
+    if (prefsBtn) {
+      prefsBtn.click();
+      await Utils.sleep(CONFIG.dynamicLoadDelay);
+
+      // Wait for the preference center to open
+      const pcSdk = await Utils.waitForElement('#onetrust-pc-sdk', 5000);
+      if (pcSdk) {
+        // Click "Reject Non-Essential" button in the PC panel
+        const pcRejectBtn = pcSdk.querySelector(
+          '.ot-pc-refuse-all-handler, button.save-preference-btn-handler'
+        );
+        if (pcRejectBtn && pcRejectBtn.textContent.toLowerCase().includes('reject')) {
+          pcRejectBtn.click();
           rejected++;
           return { rejected, vendorsUnticked };
         }
 
-        // Strategy 2: Open preferences, untick everything, save
-        const prefsBtn =
-          document.getElementById('onetrust-pc-btn-handler') ||
-          document.querySelector('.ot-pc-btn-handler');
-        if (prefsBtn) {
-          prefsBtn.click();
-          await Utils.sleep(CONFIG.dynamicLoadDelay);
-
-          // Wait for the preference center to open
-          const pcSdk = await Utils.waitForElement('#onetrust-pc-sdk', 5000);
-          if (pcSdk) {
-            // Click "Reject Non-Essential" button in the PC panel
-            const pcRejectBtn = pcSdk.querySelector(
-              '.ot-pc-refuse-all-handler, button.save-preference-btn-handler'
-            );
-            if (pcRejectBtn && pcRejectBtn.textContent.toLowerCase().includes('reject')) {
-              pcRejectBtn.click();
-              rejected++;
-              return { rejected, vendorsUnticked };
-            }
-
-            // If no reject-all in PC, untick all category toggles manually
-            const categorySwitches = pcSdk.querySelectorAll(
-              '.category-switch-handler, input.ot-handler-toneop'
-            );
-            for (const sw of categorySwitches) {
-              if (sw.checked && !sw.disabled) {
-                sw.click();
-                rejected++;
-              }
-            }
-
-            // Expand and handle vendor list
-            const vendorListBtn = pcSdk.querySelector(
-              '.onetrust-vendors-list-handler, [class*="vendor-list"]'
-            );
-            if (vendorListBtn) {
-              vendorListBtn.click();
-              await Utils.sleep(CONFIG.dynamicLoadDelay);
-
-              // Untick all vendor toggles
-              const vendorContainer = pcSdk.querySelector(
-                '#ot-hosts-list, #ot-vendor-list, .ot-vlst-cntr, [class*="vendor-list"]'
-              );
-              if (vendorContainer) {
-                vendorsUnticked = await Utils.untickAllToggles(vendorContainer, {
-                  toggleSelector: '.ot-switch input, input[type="checkbox"], input[role="switch"]',
-                });
-              }
-
-              // Also click "Select All Vendors" toggle off if it exists
-              const selectAllVendors = pcSdk.querySelector(
-                '#select-all-vendor-groups-handler, .ot-select-all-vendor'
-              );
-              if (selectAllVendors) {
-                const selectAllSwitch = selectAllVendors.querySelector('input');
-                if (selectAllSwitch && selectAllSwitch.checked) {
-                  selectAllSwitch.click();
-                }
-              }
-            }
-
-            // Click "Confirm My Choices" / "Save Preferences"
-            const saveBtn = pcSdk.querySelector(
-              '.save-preference-btn-handler, button.onetrust-close-btn-handler'
-            );
-            if (saveBtn) {
-              saveBtn.click();
-              rejected++;
-            }
+        // If no reject-all in PC, untick all category toggles manually
+        const categorySwitches = pcSdk.querySelectorAll(
+          '.category-switch-handler, input.ot-handler-toneop'
+        );
+        for (const sw of categorySwitches) {
+          if (sw.checked && !sw.disabled) {
+            sw.click();
+            rejected++;
           }
         }
 
-        return { rejected, vendorsUnticked };
-      },
-    },
-
-    // ──────────────── Fides (ethyca) ────────────────────────
-    fides: {
-      detect() {
-        return !!(
-          document.getElementById('fides-banner-container') ||
-          document.getElementById('fides-banner') ||
-          document.getElementById('fides-modal')
+        // Expand and handle vendor list
+        const vendorListBtn = pcSdk.querySelector(
+          '.onetrust-vendors-list-handler, [class*="vendor-list"]'
         );
-      },
-
-      async reject() {
-        let rejected = 0;
-        let vendorsUnticked = 0;
-
-        // Strategy 1: Direct "Reject All" button on banner
-        const rejectBtn =
-          document.getElementById('fides-reject-all-button') ||
-          document.querySelector('button.fides-reject-all-button');
-        if (rejectBtn) {
-          rejectBtn.click();
-          rejected++;
-          return { rejected, vendorsUnticked };
-        }
-
-        // Strategy 2: Open preferences modal
-        const prefsBtn =
-          document.getElementById('fides-manage-preferences-button') ||
-          document.querySelector('button.fides-manage-preferences-button');
-        if (prefsBtn) {
-          prefsBtn.click();
+        if (vendorListBtn) {
+          vendorListBtn.click();
           await Utils.sleep(CONFIG.dynamicLoadDelay);
 
-          // Wait for modal
-          const modal = await Utils.waitForElement('#fides-modal', 5000);
-          if (modal) {
-            // Untick all purpose toggles
-            const toggles = modal.querySelectorAll(
-              'input.fides-toggle-input[role="switch"]'
-            );
-            for (const toggle of toggles) {
-              if (toggle.checked && !toggle.disabled) {
-                toggle.click();
-                rejected++;
-                await Utils.sleep(30);
-              }
-            }
-
-            // Go to vendors tab and untick all
-            const vendorsTab = modal.querySelector(
-              '#fides-tab-vendors, button[class*="tab"][class*="vendor"]'
-            );
-            if (vendorsTab) {
-              vendorsTab.click();
-              await Utils.sleep(CONFIG.dynamicLoadDelay);
-
-              const vendorToggles = modal.querySelectorAll(
-                'input.fides-toggle-input[role="switch"]'
-              );
-              for (const toggle of vendorToggles) {
-                if (toggle.checked && !toggle.disabled) {
-                  toggle.click();
-                  vendorsUnticked++;
-                  await Utils.sleep(30);
-                }
-              }
-            }
-
-            // Click "Save" / "Confirm My Choices"
-            const saveBtn =
-              document.getElementById('fides-save-button') ||
-              document.querySelector('button.fides-save-button');
-            if (saveBtn) {
-              saveBtn.click();
-              rejected++;
-            } else {
-              // Try reject all in modal
-              const modalReject =
-                document.getElementById('fides-reject-all-button') ||
-                document.querySelector('#fides-modal button.fides-reject-all-button');
-              if (modalReject) {
-                modalReject.click();
-                rejected++;
-              }
-            }
-          }
-        }
-
-        return { rejected, vendorsUnticked };
-      },
-    },
-
-    // ──────────────── Ketch ────────────────────────
-    ketch: {
-      detect() {
-        return !!(
-          document.getElementById('ketch-consent-banner') ||
-          document.getElementById('ketch-banner') ||
-          document.querySelector('[id*="ketch-consent"]')
-        );
-      },
-
-      async reject() {
-        let rejected = 0;
-        let vendorsUnticked = 0;
-
-        // Strategy 1: Click "Reject All" on banner
-        const rejectBtn = document.getElementById('ketch-banner-button-secondary');
-        if (rejectBtn) {
-          rejectBtn.click();
-          rejected++;
-          return { rejected, vendorsUnticked };
-        }
-
-        // Strategy 2: Open preferences
-        const prefsBtn = document.getElementById('ketch-banner-button-tertiary');
-        if (prefsBtn) {
-          prefsBtn.click();
-          await Utils.sleep(CONFIG.dynamicLoadDelay);
-
-          // Untick all purpose toggles
-          const toggles = document.querySelectorAll(
-            '#ketch-preferences input[role="switch"], [id*="ketch"] input[role="switch"]'
+          // Untick all vendor toggles
+          const vendorContainer = pcSdk.querySelector(
+            '#ot-hosts-list, #ot-vendor-list, .ot-vlst-cntr, [class*="vendor-list"]'
           );
-          for (const toggle of toggles) {
-            const purpose = toggle.id;
-            if (purpose === 'required') continue; // skip essential
-            if (toggle.checked) {
+          if (vendorContainer) {
+            vendorsUnticked = await Utils.untickAllToggles(vendorContainer, {
+              toggleSelector: '.ot-switch input, input[type="checkbox"], input[role="switch"]',
+            });
+          }
+
+          // Also click "Select All Vendors" toggle off if it exists
+          const selectAllVendors = pcSdk.querySelector(
+            '#select-all-vendor-groups-handler, .ot-select-all-vendor'
+          );
+          if (selectAllVendors) {
+            const selectAllSwitch = selectAllVendors.querySelector('input');
+            if (selectAllSwitch && selectAllSwitch.checked) {
+              selectAllSwitch.click();
+            }
+          }
+        }
+
+        // Click "Confirm My Choices" / "Save Preferences"
+        const saveBtn = pcSdk.querySelector(
+          '.save-preference-btn-handler, button.onetrust-close-btn-handler'
+        );
+        if (saveBtn) {
+          saveBtn.click();
+          rejected++;
+        }
+      }
+    }
+
+    return { rejected, vendorsUnticked };
+  });
+
+  // ──────────────── Fides (ethyca) ────────────────────────
+  registerHandler('fides', 'Fides (ethyca)', function detect() {
+    return !!(
+      document.getElementById('fides-banner-container') ||
+      document.getElementById('fides-banner') ||
+      document.getElementById('fides-modal')
+    );
+  }, async function reject() {
+    let rejected = 0;
+    let vendorsUnticked = 0;
+
+    // Strategy 1: Direct "Reject All" button on banner
+    const rejectBtn =
+      document.getElementById('fides-reject-all-button') ||
+      document.querySelector('button.fides-reject-all-button');
+    if (rejectBtn) {
+      rejectBtn.click();
+      rejected++;
+      return { rejected, vendorsUnticked };
+    }
+
+    // Strategy 2: Open preferences modal
+    const prefsBtn =
+      document.getElementById('fides-manage-preferences-button') ||
+      document.querySelector('button.fides-manage-preferences-button');
+    if (prefsBtn) {
+      prefsBtn.click();
+      await Utils.sleep(CONFIG.dynamicLoadDelay);
+
+      // Wait for modal
+      const modal = await Utils.waitForElement('#fides-modal', 5000);
+      if (modal) {
+        // Untick all purpose toggles
+        const toggles = modal.querySelectorAll(
+          'input.fides-toggle-input[role="switch"]'
+        );
+        for (const toggle of toggles) {
+          if (toggle.checked && !toggle.disabled) {
+            toggle.click();
+            rejected++;
+            await Utils.sleep(30);
+          }
+        }
+
+        // Go to vendors tab and untick all
+        const vendorsTab = modal.querySelector(
+          '#fides-tab-vendors, button[class*="tab"][class*="vendor"]'
+        );
+        if (vendorsTab) {
+          vendorsTab.click();
+          await Utils.sleep(CONFIG.dynamicLoadDelay);
+
+          const vendorToggles = modal.querySelectorAll(
+            'input.fides-toggle-input[role="switch"]'
+          );
+          for (const toggle of vendorToggles) {
+            if (toggle.checked && !toggle.disabled) {
               toggle.click();
-              rejected++;
+              vendorsUnticked++;
               await Utils.sleep(30);
             }
           }
-
-          // Handle vendor list
-          const vendorLink = Utils.findByText('vendors', document, 'button');
-          if (vendorLink) {
-            vendorLink.click();
-            await Utils.sleep(CONFIG.dynamicLoadDelay);
-
-            const vendorToggles = document.querySelectorAll(
-              '[id*="ketch"] .ketch-peer, [id*="ketch"] input[role="switch"]'
-            );
-            for (const toggle of vendorToggles) {
-              if (toggle.checked) {
-                toggle.click();
-                vendorsUnticked++;
-                await Utils.sleep(30);
-              }
-            }
-          }
-
-          // Save choices
-          const saveBtn = Utils.findByText('save your choices', document, 'button');
-          if (saveBtn) {
-            saveBtn.click();
-            rejected++;
-          } else {
-            // Try reject all in preferences panel
-            const rejectAll = Utils.findByText('reject all', document, 'button');
-            if (rejectAll) {
-              rejectAll.click();
-              rejected++;
-            }
-          }
         }
 
-        return { rejected, vendorsUnticked };
-      },
-    },
-
-    // ──────────────── Cookiebot ────────────────────────
-    cookiebot: {
-      detect() {
-        return !!(
-          document.getElementById('CybotCookiebotDialog') ||
-          window.Cookiebot ||
-          document.querySelector('[data-cb-id]')
-        );
-      },
-
-      async reject() {
-        let rejected = 0;
-        let vendorsUnticked = 0;
-
-        // Strategy 1: Click "Decline" / "Reject All"
-        const declineBtn =
-          document.getElementById('CybotCookiebotDialogBodyLevelButtonLevelOptinDeclineAll') ||
-          document.querySelector('.CybotCookiebotDialogBodyLevelButtonLevelOptinDeclineAll') ||
-          Utils.findByText('decline', document.getElementById('CybotCookiebotDialog'), 'a, button');
-        if (declineBtn) {
-          declineBtn.click();
+        // Click "Save" / "Confirm My Choices"
+        const saveBtn =
+          document.getElementById('fides-save-button') ||
+          document.querySelector('button.fides-save-button');
+        if (saveBtn) {
+          saveBtn.click();
           rejected++;
-          return { rejected, vendorsUnticked };
-        }
-
-        // Strategy 2: Open details and untick everything
-        const detailsBtn =
-          document.getElementById('CybotCookiebotDialogBodyLevelButtonDetails') ||
-          document.querySelector('.CybotCookiebotDialogBodyLevelButtonDetails');
-        if (detailsBtn) {
-          detailsBtn.click();
-          await Utils.sleep(CONFIG.dynamicLoadDelay);
-
-          const dialog = document.getElementById('CybotCookiebotDialog');
-          if (dialog) {
-            // Untick all non-necessary toggles
-            const toggles = dialog.querySelectorAll(
-              'input[type="checkbox"]:not(#CybotCookiebotDialogBodyLevelButtonLevel0)'
-            );
-            for (const toggle of toggles) {
-              if (toggle.checked && !toggle.disabled) {
-                toggle.click();
-                rejected++;
-              }
-            }
-
-            // Handle vendor toggles in Cookiebot
-            const vendorToggle = dialog.querySelectorAll(
-              '.CybotCookiebotDialogDetailBodyContentCookieContainerCheckbox, [class*="vendor"] input[type="checkbox"]'
-            );
-            for (const toggle of vendorToggle) {
-              if (toggle.checked && !toggle.disabled) {
-                toggle.click();
-                vendorsUnticked++;
-              }
-            }
-          }
-
-          // Save
-          const saveBtn =
-            document.getElementById('CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll') ||
-            Utils.findByText('save', dialog || document, 'a, button');
-          if (saveBtn) {
-            saveBtn.click();
+        } else {
+          // Try reject all in modal
+          const modalReject =
+            document.getElementById('fides-reject-all-button') ||
+            document.querySelector('#fides-modal button.fides-reject-all-button');
+          if (modalReject) {
+            modalReject.click();
             rejected++;
           }
         }
+      }
+    }
 
-        return { rejected, vendorsUnticked };
-      },
-    },
+    return { rejected, vendorsUnticked };
+  });
 
-    // ──────────────── Didomi ────────────────────────
-    didomi: {
-      detect() {
-        return !!(
-          document.getElementById('didomi-popup') ||
-          document.getElementById('didomi-host') ||
-          window.Didomi
-        );
-      },
+  // ──────────────── Ketch ────────────────────────
+  registerHandler('ketch', 'Ketch', function detect() {
+    return !!(
+      document.getElementById('ketch-consent-banner') ||
+      document.getElementById('ketch-banner') ||
+      document.querySelector('[id*="ketch-consent"]')
+    );
+  }, async function reject() {
+    let rejected = 0;
+    let vendorsUnticked = 0;
 
-      async reject() {
-        let rejected = 0;
-        let vendorsUnticked = 0;
+    // Strategy 1: Click "Reject All" on banner
+    const rejectBtn = document.getElementById('ketch-banner-button-secondary');
+    if (rejectBtn) {
+      rejectBtn.click();
+      rejected++;
+      return { rejected, vendorsUnticked };
+    }
 
-        const popup = document.getElementById('didomi-popup');
-        if (!popup) return { rejected, vendorsUnticked };
+    // Strategy 2: Open preferences
+    const prefsBtn = document.getElementById('ketch-banner-button-tertiary');
+    if (prefsBtn) {
+      prefsBtn.click();
+      await Utils.sleep(CONFIG.dynamicLoadDelay);
 
-        // Strategy 1: Click "Disagree" / "Reject All"
-        const disagreeBtn =
-          document.getElementById('didomi-notice-disagree-button') ||
-          popup.querySelector('[id*="disagree"], [id*="reject"]') ||
-          Utils.findByText('disagree', popup, 'button, a') ||
-          Utils.findByText('reject all', popup, 'button, a');
-        if (disagreeBtn) {
-          disagreeBtn.click();
+      // Untick all purpose toggles
+      const toggles = document.querySelectorAll(
+        '#ketch-preferences input[role="switch"], [id*="ketch"] input[role="switch"]'
+      );
+      for (const toggle of toggles) {
+        const purpose = toggle.id;
+        if (purpose === 'required') continue; // skip essential
+        if (toggle.checked) {
+          toggle.click();
           rejected++;
-          return { rejected, vendorsUnticked };
+          await Utils.sleep(30);
         }
+      }
 
-        // Strategy 2: Open preferences and untick
-        const prefsBtn =
-          document.getElementById('didomi-notice-learn-more-link') ||
-          Utils.findByText('learn more', popup, 'button, a') ||
-          Utils.findByText('manage', popup, 'button, a') ||
-          Utils.findByText('preferences', popup, 'button, a');
-        if (prefsBtn) {
-          prefsBtn.click();
-          await Utils.sleep(CONFIG.dynamicLoadDelay);
+      // Handle vendor list
+      const vendorLink = Utils.findByText('vendors', document, 'button');
+      if (vendorLink) {
+        vendorLink.click();
+        await Utils.sleep(CONFIG.dynamicLoadDelay);
 
-          // Untick all purpose toggles
-          const toggles = document.querySelectorAll(
-            '#didomi-popup input[type="checkbox"], #didomi-popup [role="switch"]'
-          );
-          for (const toggle of toggles) {
-            if (toggle.checked && !toggle.disabled) {
-              toggle.click();
-              rejected++;
-            }
-          }
-
-          // Handle vendors tab
-          const vendorsTab = Utils.findByText('vendors', document.getElementById('didomi-popup'), 'button, a, span');
-          if (vendorsTab) {
-            vendorsTab.click();
-            await Utils.sleep(CONFIG.dynamicLoadDelay);
-
-            const vendorToggles = document.querySelectorAll(
-              '#didomi-popup input[type="checkbox"], #didomi-popup [role="switch"]'
-            );
-            for (const toggle of vendorToggles) {
-              if (toggle.checked && !toggle.disabled) {
-                toggle.click();
-                vendorsUnticked++;
-              }
-            }
-          }
-
-          // Save/disagree
-          const saveBtn =
-            document.getElementById('didomi-notice-disagree-button') ||
-            Utils.findByText('disagree', document.getElementById('didomi-popup'), 'button, a') ||
-            Utils.findByText('save', document.getElementById('didomi-popup'), 'button, a') ||
-            Utils.findByText('confirm', document.getElementById('didomi-popup'), 'button, a');
-          if (saveBtn) {
-            saveBtn.click();
-            rejected++;
-          }
-        }
-
-        return { rejected, vendorsUnticked };
-      },
-    },
-
-    // ──────────────── Sourcepoint ────────────────────────
-    sourcepoint: {
-      detect() {
-        return !!(
-          document.querySelector('[id^="sp_message_iframe"]') ||
-          document.querySelector('.sp_message_container') ||
-          window._sp_
+        const vendorToggles = document.querySelectorAll(
+          '[id*="ketch"] .ketch-peer, [id*="ketch"] input[role="switch"]'
         );
-      },
-
-      async reject() {
-        let rejected = 0;
-        let vendorsUnticked = 0;
-
-        // Sourcepoint often uses iframes
-        const iframe = document.querySelector(
-          '[id^="sp_message_iframe"], iframe[src*="privacy-mgmt"], iframe[src*="sourcepoint"]'
-        );
-        if (iframe && iframe.contentDocument) {
-          try {
-            const doc = iframe.contentDocument;
-
-            // Click "Reject All" / "Manage Options"
-            const rejectBtn =
-              doc.querySelector('[class*="reject"], button[class*="reject"]') ||
-              Utils.findByText('reject', doc, 'button, a') ||
-              Utils.findByText('do not sell', doc, 'button, a') ||
-              Utils.findByText('do not consent', doc, 'button, a');
-            if (rejectBtn) {
-              rejectBtn.click();
-              rejected++;
-              return { rejected, vendorsUnticked };
-            }
-
-            // Open preferences
-            const prefsBtn =
-              Utils.findByText('manage options', doc, 'button, a') ||
-              Utils.findByText('manage preferences', doc, 'button, a');
-            if (prefsBtn) {
-              prefsBtn.click();
-              await Utils.sleep(CONFIG.dynamicLoadDelay);
-
-              // Untick toggles
-              const toggles = doc.querySelectorAll(
-                'input[type="checkbox"], input[role="switch"], [class*="toggle"]'
-              );
-              for (const toggle of toggles) {
-                if (toggle.checked && !toggle.disabled) {
-                  toggle.click();
-                  rejected++;
-                }
-              }
-
-              // Save
-              const saveBtn =
-                Utils.findByText('save', doc, 'button, a') ||
-                Utils.findByText('confirm', doc, 'button, a');
-              if (saveBtn) {
-                saveBtn.click();
-                rejected++;
-              }
-            }
-          } catch (e) {
-            // Cross-origin iframe - fall through to API-based approach
+        for (const toggle of vendorToggles) {
+          if (toggle.checked) {
+            toggle.click();
+            vendorsUnticked++;
+            await Utils.sleep(30);
           }
         }
+      }
 
-        // Try direct approach (non-iframe)
-        const spContainer =
-          document.querySelector('.sp_message_container') ||
-          document.querySelector('[class*="sp_veil"]');
-        if (spContainer) {
-          const rejectBtn =
-            Utils.findByText('reject', spContainer, 'button, a') ||
-            Utils.findByText('do not sell', spContainer, 'button, a');
-          if (rejectBtn) {
-            rejectBtn.click();
-            rejected++;
-          }
-        }
-
-        // API-based: use TCF API to set consent
-        if (rejected === 0 && window.__tcfapi) {
-          try {
-            window.__tcfapi('rejectAll', 2, () => {});
-            rejected++;
-          } catch (e) { /* ignore */ }
-        }
-
-        return { rejected, vendorsUnticked };
-      },
-    },
-
-    // ──────────────── TrustArc ────────────────────────
-    trustarc: {
-      detect() {
-        return !!(
-          document.getElementById('truste-consent-track') ||
-          document.getElementById('trustarc-banner') ||
-          document.querySelector('.trustarc-banner, .truste-banner') ||
-          window.truste
-        );
-      },
-
-      async reject() {
-        let rejected = 0;
-        let vendorsUnticked = 0;
-
-        // Click "Reject All" / "Manage Preferences"
-        const container =
-          document.getElementById('truste-consent-track') ||
-          document.querySelector('.trustarc-banner, .truste-banner');
-
-        if (container) {
-          const rejectBtn =
-            container.querySelector('[class*="reject"], button[class*="reject"]') ||
-            Utils.findByText('reject all', container, 'button, a') ||
-            Utils.findByText('decline', container, 'button, a') ||
-            Utils.findByText('opt out', container, 'button, a');
-          if (rejectBtn) {
-            rejectBtn.click();
-            rejected++;
-            return { rejected, vendorsUnticked };
-          }
-
-          // Open preferences
-          const prefsBtn =
-            Utils.findByText('manage preferences', container, 'button, a') ||
-            Utils.findByText('cookie settings', container, 'button, a') ||
-            Utils.findByText('more options', container, 'button, a');
-          if (prefsBtn) {
-            prefsBtn.click();
-            await Utils.sleep(CONFIG.dynamicLoadDelay);
-
-            // Untick all
-            const toggles = document.querySelectorAll(
-              '#truste-consent-track input[type="checkbox"], #truste-consent-track input[role="switch"]'
-            );
-            for (const toggle of toggles) {
-              if (toggle.checked && !toggle.disabled) {
-                toggle.click();
-                rejected++;
-              }
-            }
-
-            // Save
-            const saveBtn = Utils.findByText('submit', document, 'button, a') ||
-              Utils.findByText('save', document, 'button, a') ||
-              Utils.findByText('confirm', document, 'button, a');
-            if (saveBtn) {
-              saveBtn.click();
-              rejected++;
-            }
-          }
-        }
-
-        return { rejected, vendorsUnticked };
-      },
-    },
-
-    // ──────────────── Quantcast ────────────────────────
-    quantcast: {
-      detect() {
-        return !!(
-          document.querySelector('.qc-cmp2-container') ||
-          document.querySelector('[class*="qc-cmp"]') ||
-          window.__qcmp
-        );
-      },
-
-      async reject() {
-        let rejected = 0;
-        let vendorsUnticked = 0;
-
-        const container = document.querySelector('.qc-cmp2-container, [class*="qc-cmp"]');
-        if (!container) return { rejected, vendorsUnticked };
-
-        // Strategy 1: "Reject All" button
-        const rejectBtn =
-          container.querySelector('[class*="reject"], button[class*="reject"]') ||
-          Utils.findByText('reject all', container, 'button, span') ||
-          Utils.findByText('i do not accept', container, 'button, span');
-        if (rejectBtn) {
-          rejectBtn.click();
-          rejected++;
-          return { rejected, vendorsUnticked };
-        }
-
-        // Strategy 2: Open preferences
-        const prefsBtn =
-          Utils.findByText('manage', container, 'button, span') ||
-          Utils.findByText('preferences', container, 'button, span') ||
-          Utils.findByText('customize', container, 'button, span');
-        if (prefsBtn) {
-          prefsBtn.click();
-          await Utils.sleep(CONFIG.dynamicLoadDelay);
-
-          // Toggle off all purposes
-          const toggles = container.querySelectorAll(
-            'input[type="checkbox"], [role="switch"], .qc-cmp2-toggle'
-          );
-          for (const toggle of toggles) {
-            const input = toggle.querySelector('input') || toggle;
-            if (input.checked && !input.disabled) {
-              input.click();
-              rejected++;
-            }
-          }
-
-          // Save
-          const saveBtn =
-            Utils.findByText('save', container, 'button, span') ||
-            Utils.findByText('confirm', container, 'button, span');
-          if (saveBtn) {
-            saveBtn.click();
-            rejected++;
-          }
-        }
-
-        return { rejected, vendorsUnticked };
-      },
-    },
-
-    // ──────────────── Usercentrics ────────────────────────
-    usercentrics: {
-      detect() {
-        return !!(
-          document.getElementById('usercentrics-root') ||
-          document.querySelector('[data-testid="uc-banner"]') ||
-          window.UC_UI
-        );
-      },
-
-      async reject() {
-        let rejected = 0;
-        let vendorsUnticked = 0;
-
-        const root = document.getElementById('usercentrics-root');
-        const container = root ? root.shadowRoot : document;
-
-        // Click "Deny All" / "Reject All"
-        const denyBtn =
-          (container.querySelector ? container : document).querySelector(
-            '[data-testid="uc-deny-all-button"], button[class*="deny"]'
-          ) ||
-          Utils.findByText('deny all', container.querySelector ? container : document, 'button') ||
-          Utils.findByText('reject all', container.querySelector ? container : document, 'button');
-        if (denyBtn) {
-          denyBtn.click();
-          rejected++;
-          return { rejected, vendorsUnticked };
-        }
-
-        // Open more details
-        const moreBtn =
-          (container.querySelector ? container : document).querySelector(
-            '[data-testid="uc-more-button"]'
-          ) ||
-          Utils.findByText('more', container.querySelector ? container : document, 'button');
-        if (moreBtn) {
-          moreBtn.click();
-          await Utils.sleep(CONFIG.dynamicLoadDelay);
-
-          // Toggle all off
-          const toggles = (container.querySelectorAll ? container : document).querySelectorAll(
-            'input[type="checkbox"], input[role="switch"]'
-          );
-          for (const toggle of toggles) {
-            if (toggle.checked && !toggle.disabled) {
-              toggle.click();
-              rejected++;
-            }
-          }
-
-          // Save
-          const saveBtn =
-            Utils.findByText('save', container.querySelector ? container : document, 'button') ||
-            Utils.findByText('save preferences', container.querySelector ? container : document, 'button');
-          if (saveBtn) {
-            saveBtn.click();
-            rejected++;
-          }
-        }
-
-        // Fallback: use UC_UI API
-        if (rejected === 0 && window.UC_UI) {
-          try {
-            window.UC_UI.rejectAll();
-            rejected++;
-          } catch (e) { /* ignore */ }
-        }
-
-        return { rejected, vendorsUnticked };
-      },
-    },
-
-    // ──────────────── CookieYes ────────────────────────
-    cookieyes: {
-      detect() {
-        return !!(
-          document.getElementById('cky-btn-reject') ||
-          document.querySelector('.cky-consent-bar') ||
-          document.querySelector('[data-cky-tag]')
-        );
-      },
-
-      async reject() {
-        let rejected = 0;
-        let vendorsUnticked = 0;
-
-        // Click "Reject All"
-        const rejectBtn =
-          document.getElementById('cky-btn-reject') ||
-          document.querySelector('[data-cky-tag="reject-button"]') ||
-          Utils.findByText('reject all', document.querySelector('.cky-consent-bar') || document, 'button');
-        if (rejectBtn) {
-          rejectBtn.click();
-          rejected++;
-          return { rejected, vendorsUnticked };
-        }
-
-        // Open preferences
-        const prefsBtn =
-          document.querySelector('[data-cky-tag="settings-button"]') ||
-          Utils.findByText('manage', document.querySelector('.cky-consent-bar') || document, 'button');
-        if (prefsBtn) {
-          prefsBtn.click();
-          await Utils.sleep(CONFIG.dynamicLoadDelay);
-
-          const modal = document.querySelector('.cky-modal, [class*="cky-preference"]');
-          if (modal) {
-            const toggles = modal.querySelectorAll('input[type="checkbox"], input[role="switch"]');
-            for (const toggle of toggles) {
-              if (toggle.checked && !toggle.disabled) {
-                toggle.click();
-                rejected++;
-              }
-            }
-
-            const saveBtn =
-              modal.querySelector('[data-cky-tag="accept-button"]') ||
-              Utils.findByText('save', modal, 'button') ||
-              Utils.findByText('confirm', modal, 'button');
-            if (saveBtn) {
-              saveBtn.click();
-              rejected++;
-            }
-          }
-        }
-
-        return { rejected, vendorsUnticked };
-      },
-    },
-
-    // ──────────────── Iubenda ────────────────────────
-    iubenda: {
-      detect() {
-        return !!(
-          document.querySelector('.iubenda-cs-banner') ||
-          document.getElementById('iubenda-cs-banner') ||
-          window._iub
-        );
-      },
-
-      async reject() {
-        let rejected = 0;
-        let vendorsUnticked = 0;
-
-        const banner = document.querySelector('.iubenda-cs-banner') ||
-          document.getElementById('iubenda-cs-banner');
-
-        if (banner) {
-          // Click reject/customize
-          const rejectBtn =
-            banner.querySelector('[class*="reject"], button[class*="ibtn"]') ||
-            Utils.findByText('reject', banner, 'button, a') ||
-            Utils.findByText('customize', banner, 'button, a');
-          if (rejectBtn) {
-            rejectBtn.click();
-            rejected++;
-          }
-        }
-
-        return { rejected, vendorsUnticked };
-      },
-    },
-
-    // ──────────────── ConsentManager ────────────────────────
-    consentmanager: {
-      detect() {
-        return !!(
-          document.getElementById('cmpbox') ||
-          document.getElementById('cmpwrapper') ||
-          document.querySelector('.cmpbox[role="dialog"]') ||
-          document.querySelector('[class*="cmpbox"]') ||
-          window.__cmp ||
-          window.cmp
-        );
-      },
-
-      async reject() {
-        let rejected = 0;
-        let vendorsUnticked = 0;
-
-        const box = document.getElementById('cmpbox');
-        if (!box) return { rejected, vendorsUnticked };
-
-        // Strategy 1: Click "Go to the website" / "Reject All" / "Only necessary"
-        // ConsentManager's "Go to the website" button IS the reject (proceed with essential only)
-        const rejectBtn =
-          box.querySelector('a.cmpboxbtnsave, a.cmptxt_btn_save') ||
-          box.querySelector('a.cmpboxbtnreject') ||
-          box.querySelector('[class*="cmpboxbtn"][class*="save"]') ||
-          Utils.findByText('go to the website', box, 'a, button, span') ||
-          Utils.findByText('reject all', box, 'a, button, span') ||
-          Utils.findByText('only necessary', box, 'a, button, span') ||
-          Utils.findByText('deny', box, 'a, button, span') ||
-          Utils.findByText('do not consent', box, 'a, button, span');
-        if (rejectBtn) {
-          rejectBtn.click();
-          rejected++;
-          return { rejected, vendorsUnticked };
-        }
-
-        // Strategy 2: Open settings and untick all vendor toggles
-        const settingsBtn =
-          box.querySelector('a.cmpboxbtncustom, a.cmptxt_btn_settings') ||
-          Utils.findByText('settings', box, 'a, button, span') ||
-          Utils.findByText('manage', box, 'a, button, span') ||
-          Utils.findByText('customise', box, 'a, button, span') ||
-          Utils.findByText('customize', box, 'a, button, span');
-        if (settingsBtn) {
-          settingsBtn.click();
-          await Utils.sleep(CONFIG.dynamicLoadDelay);
-
-          // Navigate through each purpose tab and toggle all vendors off
-          // Tabs: c51 (Function - always on), c52 (Marketing), c54 (Measurement)
-          const tabs = box.querySelectorAll('div.cmpboxnaviitem[role="button"]');
-          for (const tab of tabs) {
-            const purpose = tab.getAttribute('data-cmp-purpose') || '';
-            // Skip "Function" / "Essential" tabs (c51) - those vendors can't be toggled
-            if (purpose === 'c51' || purpose === 'companyinfo') continue;
-
-            tab.click();
-            await Utils.sleep(CONFIG.dynamicLoadDelay);
-
-            // Click the "toggle all vendors" switch off
-            const toggleAll = box.querySelector('a[data-cmp-vendor="all"]');
-            if (toggleAll) {
-              const isChecked = toggleAll.getAttribute('aria-checked') === 'true';
-              if (isChecked) {
-                toggleAll.click();
-                vendorsUnticked += 5; // approximate
-                await Utils.sleep(100);
-              }
-            }
-
-            // Also untick individual vendor checkboxes via aria-checked
-            const vendorToggles = box.querySelectorAll('a[role="checkbox"][data-cmp-vendor]');
-            for (const toggle of vendorToggles) {
-              if (toggle.getAttribute('data-cmp-vendor') === 'all') continue;
-              const isChecked = toggle.getAttribute('aria-checked') === 'true';
-              if (isChecked) {
-                toggle.click();
-                vendorsUnticked++;
-                await Utils.sleep(30);
-              }
-            }
-          }
-
-          // Save preferences
-          const saveBtn =
-            box.querySelector('a.cmptxt_btn_save2, a.cmpboxbtnyescustomchoices') ||
-            Utils.findByText('save the selected', box, 'a, button, span') ||
-            Utils.findByText('save', box, 'a, button, span') ||
-            Utils.findByText('confirm', box, 'a, button, span');
-          if (saveBtn) {
-            saveBtn.click();
-            rejected++;
-          }
-        }
-
-        return { rejected, vendorsUnticked };
-      },
-    },
-
-    // ──────────────── Sirdata ────────────────────────
-    sirdata: {
-      detect() {
-        return !!(
-          document.querySelector('[class*="sdrn-"]') ||
-          document.getElementById('sd-cmp')
-        );
-      },
-
-      async reject() {
-        let rejected = 0;
-        let vendorsUnticked = 0;
-
-        const container = document.getElementById('sd-cmp') ||
-          document.querySelector('[class*="sdrn-cmp"]');
-        if (!container) return { rejected, vendorsUnticked };
-
-        const rejectBtn =
-          container.querySelector('[class*="reject"]') ||
-          Utils.findByText('reject', container, 'button, a');
-        if (rejectBtn) {
-          rejectBtn.click();
+      // Save choices
+      const saveBtn = Utils.findByText('save your choices', document, 'button');
+      if (saveBtn) {
+        saveBtn.click();
+        rejected++;
+      } else {
+        // Try reject all in preferences panel
+        const rejectAll = Utils.findByText('reject all', document, 'button');
+        if (rejectAll) {
+          rejectAll.click();
           rejected++;
         }
+      }
+    }
 
-        return { rejected, vendorsUnticked };
-      },
-    },
+    return { rejected, vendorsUnticked };
+  });
 
-    // ──────────────── Ezoic ────────────────────────
-    ezcookie: {
-      detect() {
-        return !!(
-          document.querySelector('[class*="ez-cookie"]') ||
-          document.getElementById('ez-cookie-dialog')
+  // ──────────────── Cookiebot ────────────────────────
+  registerHandler('cookiebot', 'Cookiebot', function detect() {
+    return !!(
+      document.getElementById('CybotCookiebotDialog') ||
+      window.Cookiebot ||
+      document.querySelector('[data-cb-id]')
+    );
+  }, async function reject() {
+    let rejected = 0;
+    let vendorsUnticked = 0;
+
+    // Strategy 1: Click "Decline" / "Reject All"
+    const declineBtn =
+      document.getElementById('CybotCookiebotDialogBodyLevelButtonLevelOptinDeclineAll') ||
+      document.querySelector('.CybotCookiebotDialogBodyLevelButtonLevelOptinDeclineAll') ||
+      Utils.findByText('decline', document.getElementById('CybotCookiebotDialog'), 'a, button');
+    if (declineBtn) {
+      declineBtn.click();
+      rejected++;
+      return { rejected, vendorsUnticked };
+    }
+
+    // Strategy 2: Open details and untick everything
+    const detailsBtn =
+      document.getElementById('CybotCookiebotDialogBodyLevelButtonDetails') ||
+      document.querySelector('.CybotCookiebotDialogBodyLevelButtonDetails');
+    if (detailsBtn) {
+      detailsBtn.click();
+      await Utils.sleep(CONFIG.dynamicLoadDelay);
+
+      const dialog = document.getElementById('CybotCookiebotDialog');
+      if (dialog) {
+        // Untick all non-necessary toggles
+        const toggles = dialog.querySelectorAll(
+          'input[type="checkbox"]:not(#CybotCookiebotDialogBodyLevelButtonLevel0)'
         );
-      },
-
-      async reject() {
-        let rejected = 0;
-        let vendorsUnticked = 0;
-
-        const container = document.querySelector('[class*="ez-cookie"]') ||
-          document.getElementById('ez-cookie-dialog');
-        if (!container) return { rejected, vendorsUnticked };
-
-        const rejectBtn =
-          container.querySelector('[class*="reject"], [class*="decline"]') ||
-          Utils.findByText('reject', container, 'button, a') ||
-          Utils.findByText('decline', container, 'button, a');
-        if (rejectBtn) {
-          rejectBtn.click();
-          rejected++;
-        }
-
-        return { rejected, vendorsUnticked };
-      },
-    },
-
-    // ──────────────── Borlabs Cookie ────────────────
-    borlabs: {
-      detect() {
-        return !!(
-          document.querySelector('#BorlabsCookieBox') ||
-          window.BorlabsCookie
-        );
-      },
-
-      async reject() {
-        let rejected = 0;
-        let vendorsUnticked = 0;
-
-        const box = document.querySelector('#BorlabsCookieBox');
-        if (!box) return { rejected, vendorsUnticked };
-
-        // Click "Accept Only Essential"
-        const rejectBtn =
-          box.querySelector('[class*="reject"], [id*="reject"]') ||
-          Utils.findByText('accept only essential', box, 'button, a') ||
-          Utils.findByText('reject', box, 'button, a');
-        if (rejectBtn) {
-          rejectBtn.click();
-          rejected++;
-          return { rejected, vendorsUnticked };
-        }
-
-        // Open preferences
-        const prefsBtn =
-          box.querySelector('[class*="customize"], [id*="customize"]') ||
-          Utils.findByText('customize', box, 'button, a') ||
-          Utils.findByText('individual', box, 'button, a');
-        if (prefsBtn) {
-          prefsBtn.click();
-          await Utils.sleep(CONFIG.dynamicLoadDelay);
-
-          const toggles = document.querySelectorAll(
-            '#BorlabsCookieBox input[type="checkbox"]:not([disabled])'
-          );
-          for (const toggle of toggles) {
-            if (toggle.checked) {
-              toggle.click();
-              rejected++;
-            }
-          }
-
-          const saveBtn =
-            Utils.findByText('save', document.querySelector('#BorlabsCookieBox'), 'button, a');
-          if (saveBtn) {
-            saveBtn.click();
+        for (const toggle of toggles) {
+          if (toggle.checked && !toggle.disabled) {
+            toggle.click();
             rejected++;
           }
         }
 
-        return { rejected, vendorsUnticked };
-      },
-    },
-
-    // ──────────────── LGCookiesLaw (PrestaShop) ──────────────────
-    lgcookieslaw: {
-      detect() {
-        return !!(
-          document.getElementById('lgcookieslaw_banner') ||
-          document.querySelector('.lgcookieslaw-banner')
+        // Handle vendor toggles in Cookiebot
+        const vendorToggle = dialog.querySelectorAll(
+          '.CybotCookiebotDialogDetailBodyContentCookieContainerCheckbox, [class*="vendor"] input[type="checkbox"]'
         );
-      },
-
-      async reject() {
-        let rejected = 0;
-        let vendorsUnticked = 0;
-
-        const banner = document.getElementById('lgcookieslaw_banner');
-        if (!banner) return { rejected, vendorsUnticked };
-
-        // Strategy 1: Click "Reject All" button directly
-        const rejectBtn = banner.querySelector('.lgcookieslaw-reject-button');
-        if (rejectBtn) {
-          rejectBtn.click();
-          rejected++;
-          return { rejected, vendorsUnticked };
+        for (const toggle of vendorToggle) {
+          if (toggle.checked && !toggle.disabled) {
+            toggle.click();
+            vendorsUnticked++;
+          }
         }
+      }
 
-        // Strategy 2: Open "Customize cookies" modal, untick all, save
-        const customizeLink = document.getElementById('lgcookieslaw_customize_cookies_link') ||
-          banner.querySelector('.lgcookieslaw-customize-cookies-link');
-        if (customizeLink) {
-          customizeLink.click();
-          await Utils.sleep(CONFIG.dynamicLoadDelay);
+      // Save - use DECLINE ALL button, NOT "Allow All"
+      const saveBtn =
+        document.getElementById('CybotCookiebotDialogBodyLevelButtonLevelOptinDeclineAll') ||
+        Utils.findByText('save', dialog || document, 'a, button') ||
+        Utils.findByText('confirm', dialog || document, 'a, button') ||
+        Utils.findByText('submit', dialog || document, 'a, button');
+      if (saveBtn) {
+        saveBtn.click();
+        rejected++;
+      }
+    }
 
-          const modal = document.getElementById('lgcookieslaw_modal');
-          if (modal) {
-            // Untick all purpose toggles that aren't disabled
-            const purposeInputs = modal.querySelectorAll('input.lgcookieslaw-purpose');
-            for (const input of purposeInputs) {
-              if (!input.disabled && input.checked) {
-                input.click();
-                vendorsUnticked++;
-              }
-            }
+    return { rejected, vendorsUnticked };
+  });
 
-            // Click "Reject All" in the modal footer
-            const modalRejectBtn = modal.querySelector('.lgcookieslaw-reject-button');
-            if (modalRejectBtn) {
-              modalRejectBtn.click();
-              rejected++;
-            } else {
-              // Try "Save" / partial accept as last resort
-              const partialBtn = modal.querySelector('.lgcookieslaw-partial-accept-button');
-              if (partialBtn) {
-                partialBtn.click();
-                rejected++;
-              }
-            }
+  // ──────────────── Didomi ────────────────────────
+  registerHandler('didomi', 'Didomi', function detect() {
+    return !!(
+      document.getElementById('didomi-popup') ||
+      document.getElementById('didomi-host') ||
+      window.Didomi
+    );
+  }, async function reject() {
+    let rejected = 0;
+    let vendorsUnticked = 0;
+
+    const popup = document.getElementById('didomi-popup');
+    if (!popup) return { rejected, vendorsUnticked };
+
+    // Strategy 1: Click "Disagree" / "Reject All"
+    const disagreeBtn =
+      document.getElementById('didomi-notice-disagree-button') ||
+      popup.querySelector('[id*="disagree"], [id*="reject"]') ||
+      Utils.findByText('disagree', popup, 'button, a') ||
+      Utils.findByText('reject all', popup, 'button, a');
+    if (disagreeBtn) {
+      disagreeBtn.click();
+      rejected++;
+      return { rejected, vendorsUnticked };
+    }
+
+    // Strategy 2: Open preferences and untick
+    const prefsBtn =
+      document.getElementById('didomi-notice-learn-more-link') ||
+      Utils.findByText('learn more', popup, 'button, a') ||
+      Utils.findByText('manage', popup, 'button, a') ||
+      Utils.findByText('preferences', popup, 'button, a');
+    if (prefsBtn) {
+      prefsBtn.click();
+      await Utils.sleep(CONFIG.dynamicLoadDelay);
+
+      // Untick all purpose toggles
+      const toggles = document.querySelectorAll(
+        '#didomi-popup input[type="checkbox"], #didomi-popup [role="switch"]'
+      );
+      for (const toggle of toggles) {
+        if (toggle.checked && !toggle.disabled) {
+          toggle.click();
+          rejected++;
+        }
+      }
+
+      // Handle vendors tab
+      const vendorsTab = Utils.findByText('vendors', document.getElementById('didomi-popup'), 'button, a, span');
+      if (vendorsTab) {
+        vendorsTab.click();
+        await Utils.sleep(CONFIG.dynamicLoadDelay);
+
+        const vendorToggles = document.querySelectorAll(
+          '#didomi-popup input[type="checkbox"], #didomi-popup [role="switch"]'
+        );
+        for (const toggle of vendorToggles) {
+          if (toggle.checked && !toggle.disabled) {
+            toggle.click();
+            vendorsUnticked++;
+          }
+        }
+      }
+
+      // Save/disagree
+      const saveBtn =
+        document.getElementById('didomi-notice-disagree-button') ||
+        Utils.findByText('disagree', document.getElementById('didomi-popup'), 'button, a') ||
+        Utils.findByText('save', document.getElementById('didomi-popup'), 'button, a') ||
+        Utils.findByText('confirm', document.getElementById('didomi-popup'), 'button, a');
+      if (saveBtn) {
+        saveBtn.click();
+        rejected++;
+      }
+    }
+
+    return { rejected, vendorsUnticked };
+  });
+
+  // ──────────────── Sourcepoint ────────────────────────
+  registerHandler('sourcepoint', 'Sourcepoint', function detect() {
+    return !!(
+      document.querySelector('[id^="sp_message_iframe"]') ||
+      document.querySelector('.sp_message_container') ||
+      window._sp_
+    );
+  }, async function reject() {
+    let rejected = 0;
+    let vendorsUnticked = 0;
+
+    // Sourcepoint iframes are always cross-origin, so iframe.contentDocument
+    // is always null. We skip iframe DOM access entirely and rely on the
+    // direct (non-iframe) approach and the TCF API below.
+
+    // Try direct approach (non-iframe)
+    const spContainer =
+      document.querySelector('.sp_message_container') ||
+      document.querySelector('[class*="sp_veil"]');
+    if (spContainer) {
+      const rejectBtn =
+        Utils.findByText('reject', spContainer, 'button, a') ||
+        Utils.findByText('do not sell', spContainer, 'button, a');
+      if (rejectBtn) {
+        rejectBtn.click();
+        rejected++;
+      }
+    }
+
+    // API-based: use TCF API to set consent
+    if (rejected === 0 && window.__tcfapi) {
+      try {
+        window.__tcfapi('rejectAll', 2, () => {});
+        rejected++;
+      } catch (e) { /* ignore */ }
+    }
+
+    return { rejected, vendorsUnticked };
+  });
+
+  // ──────────────── TrustArc ────────────────────────
+  registerHandler('trustarc', 'TrustArc', function detect() {
+    return !!(
+      document.getElementById('truste-consent-track') ||
+      document.getElementById('trustarc-banner') ||
+      document.querySelector('.trustarc-banner, .truste-banner') ||
+      window.truste
+    );
+  }, async function reject() {
+    let rejected = 0;
+    let vendorsUnticked = 0;
+
+    // Click "Reject All" / "Manage Preferences"
+    const container =
+      document.getElementById('truste-consent-track') ||
+      document.querySelector('.trustarc-banner, .truste-banner');
+
+    if (container) {
+      const rejectBtn =
+        container.querySelector('[class*="reject"], button[class*="reject"]') ||
+        Utils.findByText('reject all', container, 'button, a') ||
+        Utils.findByText('decline', container, 'button, a') ||
+        Utils.findByText('opt out', container, 'button, a');
+      if (rejectBtn) {
+        rejectBtn.click();
+        rejected++;
+        return { rejected, vendorsUnticked };
+      }
+
+      // Open preferences
+      const prefsBtn =
+        Utils.findByText('manage preferences', container, 'button, a') ||
+        Utils.findByText('cookie settings', container, 'button, a') ||
+        Utils.findByText('more options', container, 'button, a');
+      if (prefsBtn) {
+        prefsBtn.click();
+        await Utils.sleep(CONFIG.dynamicLoadDelay);
+
+        // Untick all
+        const toggles = document.querySelectorAll(
+          '#truste-consent-track input[type="checkbox"], #truste-consent-track input[role="switch"]'
+        );
+        for (const toggle of toggles) {
+          if (toggle.checked && !toggle.disabled) {
+            toggle.click();
+            rejected++;
           }
         }
 
+        // Save
+        const saveBtn = Utils.findByText('submit', document, 'button, a') ||
+          Utils.findByText('save', document, 'button, a') ||
+          Utils.findByText('confirm', document, 'button, a');
+        if (saveBtn) {
+          saveBtn.click();
+          rejected++;
+        }
+      }
+    }
+
+    return { rejected, vendorsUnticked };
+  });
+
+  // ──────────────── Quantcast ────────────────────────
+  registerHandler('quantcast', 'Quantcast', function detect() {
+    return !!(
+      document.querySelector('.qc-cmp2-container') ||
+      document.querySelector('[class*="qc-cmp"]') ||
+      window.__qcmp
+    );
+  }, async function reject() {
+    let rejected = 0;
+    let vendorsUnticked = 0;
+
+    const container = document.querySelector('.qc-cmp2-container, [class*="qc-cmp"]');
+    if (!container) return { rejected, vendorsUnticked };
+
+    // Strategy 1: "Reject All" button
+    const rejectBtn =
+      container.querySelector('[class*="reject"], button[class*="reject"]') ||
+      Utils.findByText('reject all', container, 'button, span') ||
+      Utils.findByText('i do not accept', container, 'button, span');
+    if (rejectBtn) {
+      rejectBtn.click();
+      rejected++;
+      return { rejected, vendorsUnticked };
+    }
+
+    // Strategy 2: Open preferences
+    const prefsBtn =
+      Utils.findByText('manage', container, 'button, span') ||
+      Utils.findByText('preferences', container, 'button, span') ||
+      Utils.findByText('customize', container, 'button, span');
+    if (prefsBtn) {
+      prefsBtn.click();
+      await Utils.sleep(CONFIG.dynamicLoadDelay);
+
+      // Toggle off all purposes
+      const toggles = container.querySelectorAll(
+        'input[type="checkbox"], [role="switch"], .qc-cmp2-toggle'
+      );
+      for (const toggle of toggles) {
+        const input = toggle.querySelector('input') || toggle;
+        if (input.checked && !input.disabled) {
+          input.click();
+          rejected++;
+        }
+      }
+
+      // Save
+      const saveBtn =
+        Utils.findByText('save', container, 'button, span') ||
+        Utils.findByText('confirm', container, 'button, span');
+      if (saveBtn) {
+        saveBtn.click();
+        rejected++;
+      }
+    }
+
+    return { rejected, vendorsUnticked };
+  });
+
+  // ──────────────── Usercentrics ────────────────────────
+  registerHandler('usercentrics', 'Usercentrics', function detect() {
+    return !!(
+      document.getElementById('usercentrics-root') ||
+      document.querySelector('[data-testid="uc-banner"]') ||
+      window.UC_UI
+    );
+  }, async function reject() {
+    let rejected = 0;
+    let vendorsUnticked = 0;
+
+    const root = document.getElementById('usercentrics-root');
+    const container = root ? root.shadowRoot : document;
+
+    // Click "Deny All" / "Reject All"
+    const denyBtn =
+      (container.querySelector ? container : document).querySelector(
+        '[data-testid="uc-deny-all-button"], button[class*="deny"]'
+      ) ||
+      Utils.findByText('deny all', container.querySelector ? container : document, 'button') ||
+      Utils.findByText('reject all', container.querySelector ? container : document, 'button');
+    if (denyBtn) {
+      denyBtn.click();
+      rejected++;
+      return { rejected, vendorsUnticked };
+    }
+
+    // Open more details
+    const moreBtn =
+      (container.querySelector ? container : document).querySelector(
+        '[data-testid="uc-more-button"]'
+      ) ||
+      Utils.findByText('more', container.querySelector ? container : document, 'button');
+    if (moreBtn) {
+      moreBtn.click();
+      await Utils.sleep(CONFIG.dynamicLoadDelay);
+
+      // Toggle all off
+      const toggles = (container.querySelectorAll ? container : document).querySelectorAll(
+        'input[type="checkbox"], input[role="switch"]'
+      );
+      for (const toggle of toggles) {
+        if (toggle.checked && !toggle.disabled) {
+          toggle.click();
+          rejected++;
+        }
+      }
+
+      // Save
+      const saveBtn =
+        Utils.findByText('save', container.querySelector ? container : document, 'button') ||
+        Utils.findByText('save preferences', container.querySelector ? container : document, 'button');
+      if (saveBtn) {
+        saveBtn.click();
+        rejected++;
+      }
+    }
+
+    // Fallback: use UC_UI API
+    if (rejected === 0 && window.UC_UI) {
+      try {
+        window.UC_UI.rejectAll();
+        rejected++;
+      } catch (e) { /* ignore */ }
+    }
+
+    return { rejected, vendorsUnticked };
+  });
+
+  // ──────────────── CookieYes ────────────────────────
+  registerHandler('cookieyes', 'CookieYes', function detect() {
+    return !!(
+      document.getElementById('cky-btn-reject') ||
+      document.querySelector('.cky-consent-bar') ||
+      document.querySelector('[data-cky-tag]')
+    );
+  }, async function reject() {
+    let rejected = 0;
+    let vendorsUnticked = 0;
+
+    // Click "Reject All"
+    const rejectBtn =
+      document.getElementById('cky-btn-reject') ||
+      document.querySelector('[data-cky-tag="reject-button"]') ||
+      Utils.findByText('reject all', document.querySelector('.cky-consent-bar') || document, 'button');
+    if (rejectBtn) {
+      rejectBtn.click();
+      rejected++;
+      return { rejected, vendorsUnticked };
+    }
+
+    // Open preferences
+    const prefsBtn =
+      document.querySelector('[data-cky-tag="settings-button"]') ||
+      Utils.findByText('manage', document.querySelector('.cky-consent-bar') || document, 'button');
+    if (prefsBtn) {
+      prefsBtn.click();
+      await Utils.sleep(CONFIG.dynamicLoadDelay);
+
+      const modal = document.querySelector('.cky-modal, [class*="cky-preference"]');
+      if (modal) {
+        const toggles = modal.querySelectorAll('input[type="checkbox"], input[role="switch"]');
+        for (const toggle of toggles) {
+          if (toggle.checked && !toggle.disabled) {
+            toggle.click();
+            rejected++;
+          }
+        }
+
+        const saveBtn =
+          modal.querySelector('[data-cky-tag="accept-button"]') ||
+          Utils.findByText('save', modal, 'button') ||
+          Utils.findByText('confirm', modal, 'button');
+        if (saveBtn) {
+          saveBtn.click();
+          rejected++;
+        }
+      }
+    }
+
+    return { rejected, vendorsUnticked };
+  });
+
+  // ──────────────── Iubenda ────────────────────────
+  registerHandler('iubenda', 'Iubenda', function detect() {
+    return !!(
+      document.querySelector('.iubenda-cs-banner') ||
+      document.getElementById('iubenda-cs-banner') ||
+      window._iub
+    );
+  }, async function reject() {
+    let rejected = 0;
+    let vendorsUnticked = 0;
+
+    const banner = document.querySelector('.iubenda-cs-banner') ||
+      document.getElementById('iubenda-cs-banner');
+
+    if (banner) {
+      // Click reject/customize
+      const rejectBtn =
+        banner.querySelector('[class*="reject"], button[class*="ibtn"]') ||
+        Utils.findByText('reject', banner, 'button, a') ||
+        Utils.findByText('customize', banner, 'button, a');
+      if (rejectBtn) {
+        rejectBtn.click();
+        rejected++;
+      }
+    }
+
+    return { rejected, vendorsUnticked };
+  });
+
+  // ──────────────── ConsentManager ────────────────────────
+  registerHandler('consentmanager', 'ConsentManager', function detect() {
+    return !!(
+      document.getElementById('cmpbox') ||
+      document.getElementById('cmpwrapper') ||
+      document.querySelector('.cmpbox[role="dialog"]') ||
+      document.querySelector('[class*="cmpbox"]') ||
+      window.__cmp ||
+      window.cmp
+    );
+  }, async function reject() {
+    let rejected = 0;
+    let vendorsUnticked = 0;
+
+    const box = document.getElementById('cmpbox');
+    if (!box) return { rejected, vendorsUnticked };
+
+    // Strategy 1: Click "Go to the website" / "Reject All" / "Only necessary"
+    // ConsentManager's "Go to the website" button IS the reject (proceed with essential only)
+    const rejectBtn =
+      box.querySelector('a.cmpboxbtnsave, a.cmptxt_btn_save') ||
+      box.querySelector('a.cmpboxbtnreject') ||
+      box.querySelector('[class*="cmpboxbtn"][class*="save"]') ||
+      Utils.findByText('go to the website', box, 'a, button, span') ||
+      Utils.findByText('reject all', box, 'a, button, span') ||
+      Utils.findByText('only necessary', box, 'a, button, span') ||
+      Utils.findByText('deny', box, 'a, button, span') ||
+      Utils.findByText('do not consent', box, 'a, button, span');
+    if (rejectBtn) {
+      rejectBtn.click();
+      rejected++;
+      return { rejected, vendorsUnticked };
+    }
+
+    // Strategy 2: Open settings and untick all vendor toggles
+    const settingsBtn =
+      box.querySelector('a.cmpboxbtncustom, a.cmptxt_btn_settings') ||
+      Utils.findByText('settings', box, 'a, button, span') ||
+      Utils.findByText('manage', box, 'a, button, span') ||
+      Utils.findByText('customise', box, 'a, button, span') ||
+      Utils.findByText('customize', box, 'a, button, span');
+    if (settingsBtn) {
+      settingsBtn.click();
+      await Utils.sleep(CONFIG.dynamicLoadDelay);
+
+      // Navigate through each purpose tab and toggle all vendors off
+      // Tabs: c51 (Function - always on), c52 (Marketing), c54 (Measurement)
+      const tabs = box.querySelectorAll('div.cmpboxnaviitem[role="button"]');
+      for (const tab of tabs) {
+        const purpose = tab.getAttribute('data-cmp-purpose') || '';
+        // Skip "Function" / "Essential" tabs (c51) - those vendors can't be toggled
+        if (purpose === 'c51' || purpose === 'companyinfo') continue;
+
+        tab.click();
+        await Utils.sleep(CONFIG.dynamicLoadDelay);
+
+        // Click the "toggle all vendors" switch off
+        const toggleAll = box.querySelector('a[data-cmp-vendor="all"]');
+        if (toggleAll) {
+          const isChecked = toggleAll.getAttribute('aria-checked') === 'true';
+          if (isChecked) {
+            toggleAll.click();
+            vendorsUnticked += 5; // approximate
+            await Utils.sleep(100);
+          }
+        }
+
+        // Also untick individual vendor checkboxes via aria-checked
+        const vendorToggles = box.querySelectorAll('a[role="checkbox"][data-cmp-vendor]');
+        for (const toggle of vendorToggles) {
+          if (toggle.getAttribute('data-cmp-vendor') === 'all') continue;
+          const isChecked = toggle.getAttribute('aria-checked') === 'true';
+          if (isChecked) {
+            toggle.click();
+            vendorsUnticked++;
+            await Utils.sleep(30);
+          }
+        }
+      }
+
+      // Save preferences
+      const saveBtn =
+        box.querySelector('a.cmptxt_btn_save2, a.cmpboxbtnyescustomchoices') ||
+        Utils.findByText('save the selected', box, 'a, button, span') ||
+        Utils.findByText('save', box, 'a, button, span') ||
+        Utils.findByText('confirm', box, 'a, button, span');
+      if (saveBtn) {
+        saveBtn.click();
+        rejected++;
+      }
+    }
+
+    return { rejected, vendorsUnticked };
+  });
+
+  // ──────────────── Sirdata ────────────────────────
+  registerHandler('sirdata', 'Sirdata', function detect() {
+    return !!(
+      document.querySelector('[class*="sdrn-"]') ||
+      document.getElementById('sd-cmp')
+    );
+  }, async function reject() {
+    let rejected = 0;
+    let vendorsUnticked = 0;
+
+    const container = document.getElementById('sd-cmp') ||
+      document.querySelector('[class*="sdrn-cmp"]');
+    if (!container) return { rejected, vendorsUnticked };
+
+    const rejectBtn =
+      container.querySelector('[class*="reject"]') ||
+      Utils.findByText('reject', container, 'button, a');
+    if (rejectBtn) {
+      rejectBtn.click();
+      rejected++;
+    }
+
+    return { rejected, vendorsUnticked };
+  });
+
+  // ──────────────── Ezoic ────────────────────────
+  registerHandler('ezcookie', 'Ezoic', function detect() {
+    return !!(
+      document.querySelector('[class*="ez-cookie"]') ||
+      document.getElementById('ez-cookie-dialog')
+    );
+  }, async function reject() {
+    let rejected = 0;
+    let vendorsUnticked = 0;
+
+    const container = document.querySelector('[class*="ez-cookie"]') ||
+      document.getElementById('ez-cookie-dialog');
+    if (!container) return { rejected, vendorsUnticked };
+
+    const rejectBtn =
+      container.querySelector('[class*="reject"], [class*="decline"]') ||
+      Utils.findByText('reject', container, 'button, a') ||
+      Utils.findByText('decline', container, 'button, a');
+    if (rejectBtn) {
+      rejectBtn.click();
+      rejected++;
+    }
+
+    return { rejected, vendorsUnticked };
+  });
+
+  // ──────────────── Borlabs Cookie ────────────────────────
+  registerHandler('borlabs', 'Borlabs Cookie', function detect() {
+    return !!(
+      document.querySelector('#BorlabsCookieBox') ||
+      window.BorlabsCookie
+    );
+  }, async function reject() {
+    let rejected = 0;
+    let vendorsUnticked = 0;
+
+    const box = document.querySelector('#BorlabsCookieBox');
+    if (!box) return { rejected, vendorsUnticked };
+
+    // Click "Accept Only Essential"
+    const rejectBtn =
+      box.querySelector('[class*="reject"], [id*="reject"]') ||
+      Utils.findByText('accept only essential', box, 'button, a') ||
+      Utils.findByText('reject', box, 'button, a');
+    if (rejectBtn) {
+      rejectBtn.click();
+      rejected++;
+      return { rejected, vendorsUnticked };
+    }
+
+    // Open preferences
+    const prefsBtn =
+      box.querySelector('[class*="customize"], [id*="customize"]') ||
+      Utils.findByText('customize', box, 'button, a') ||
+      Utils.findByText('individual', box, 'button, a');
+    if (prefsBtn) {
+      prefsBtn.click();
+      await Utils.sleep(CONFIG.dynamicLoadDelay);
+
+      const toggles = document.querySelectorAll(
+        '#BorlabsCookieBox input[type="checkbox"]:not([disabled])'
+      );
+      for (const toggle of toggles) {
+        if (toggle.checked) {
+          toggle.click();
+          rejected++;
+        }
+      }
+
+      const saveBtn =
+        Utils.findByText('save', document.querySelector('#BorlabsCookieBox'), 'button, a');
+      if (saveBtn) {
+        saveBtn.click();
+        rejected++;
+      }
+    }
+
+    return { rejected, vendorsUnticked };
+  });
+
+  // ──────────────── LGCookiesLaw (PrestaShop) ────────────────────────
+  registerHandler('lgcookieslaw', 'LGCookiesLaw (PrestaShop)', function detect() {
+    return !!(
+      document.getElementById('lgcookieslaw_banner') ||
+      document.querySelector('.lgcookieslaw-banner')
+    );
+  }, async function reject() {
+    let rejected = 0;
+    let vendorsUnticked = 0;
+
+    const banner = document.getElementById('lgcookieslaw_banner');
+    if (!banner) return { rejected, vendorsUnticked };
+
+    // Strategy 1: Click "Reject All" button directly
+    const rejectBtn = banner.querySelector('.lgcookieslaw-reject-button');
+    if (rejectBtn) {
+      rejectBtn.click();
+      rejected++;
+      return { rejected, vendorsUnticked };
+    }
+
+    // Strategy 2: Open "Customize cookies" modal, untick all, save
+    const customizeLink = document.getElementById('lgcookieslaw_customize_cookies_link') ||
+      banner.querySelector('.lgcookieslaw-customize-cookies-link');
+    if (customizeLink) {
+      customizeLink.click();
+      await Utils.sleep(CONFIG.dynamicLoadDelay);
+
+      const modal = document.getElementById('lgcookieslaw_modal');
+      if (modal) {
+        // Untick all purpose toggles that aren't disabled
+        const purposeInputs = modal.querySelectorAll('input.lgcookieslaw-purpose');
+        for (const input of purposeInputs) {
+          if (!input.disabled && input.checked) {
+            input.click();
+            vendorsUnticked++;
+          }
+        }
+
+        // Click "Reject All" in the modal footer
+        const modalRejectBtn = modal.querySelector('.lgcookieslaw-reject-button');
+        if (modalRejectBtn) {
+          modalRejectBtn.click();
+          rejected++;
+        } else {
+          // Try "Save" / partial accept as last resort
+          const partialBtn = modal.querySelector('.lgcookieslaw-partial-accept-button');
+          if (partialBtn) {
+            partialBtn.click();
+            rejected++;
+          }
+        }
+      }
+    }
+
+    return { rejected, vendorsUnticked };
+  });
+
+  // ──────────────── Generic (fallback) ────────────────────────
+  registerHandler('generic', 'Generic (fallback)', function detect() {
+    return CMPDetector.detectGeneric();
+  }, async function reject() {
+    let rejected = 0;
+    let vendorsUnticked = 0;
+
+    // Common reject button text patterns (lowercase, for matching)
+    const rejectTexts = [
+      'reject all', 'reject', 'decline', 'deny', 'deny all',
+      'do not consent', 'do not sell', 'do not accept',
+      'only necessary', 'essential only', 'refuse',
+      'i refuse', 'no thanks', 'no, thanks',
+      'opt out', 'opt-out', 'disagree',
+      'continue without accepting', 'manage choices',
+      'necessary cookies only', 'strictly necessary only',
+      'accept only essential', 'accept required',
+      // German
+      'ablehnen', 'alle ablehnen', 'nur notwendige',
+      'nur erforderliche', 'notwendige cookies',
+      'alle ablehnen', 'ablehnen alle',
+      'nicht akzeptieren', 'nicht zustimmen',
+      'notwendig akzeptieren',
+      // French
+      'tout refuser', 'refuser', 'refuser tout',
+      'seulement nécessaires', 'cookies nécessaires',
+      // Spanish
+      'rechazar todo', 'rechazar', 'solo necesarias',
+      'solo cookies necesarias',
+      // Italian
+      'rifiuta tutto', 'rifiuta', 'solo necessari',
+      // Dutch
+      'weiger alles', 'weigeren', 'alleen noodzakelijk',
+    ];
+
+    // Common manage/preferences text patterns
+    const prefsTexts = [
+      'manage preferences', 'manage options', 'manage cookies',
+      'cookie settings', 'privacy settings', 'more options',
+      'more information', 'customise', 'customize',
+      'learn more', 'view preferences', 'edit preferences',
+      'change settings', 'choose cookies', 'preferences',
+      // German
+      'datenschutzeinstellungen', 'cookie-einstellungen',
+      'eigene einstellungen', 'einstellungen verwalten',
+      'cookie einstellungen', 'weitere informationen',
+      // French
+      'paramètres des cookies', 'gérer les cookies',
+      'personnaliser', 'paramètres de confidentialité',
+      // Spanish
+      'configuración de cookies', 'gestionar cookies',
+      'configurar', 'ajustes de privacidad',
+    ];
+
+    // Common save/confirm text patterns
+    const saveTexts = [
+      'save preferences', 'save choices', 'save settings',
+      'save my choices', 'save your choices', 'save',
+      'confirm choices', 'confirm my choices', 'confirm',
+      'update preferences', 'apply',
+      // German
+      'auswahl übernehmen', 'auswahl speichern',
+      'einstellungen speichern', 'speichern', 'bestätigen',
+      'auswahl bestätigen', 'übernehmen',
+      // French
+      'enregistrer', 'confirmer', 'valider',
+      'sauvegarder les choix', 'enregistrer les préférences',
+      // Spanish
+      'guardar', 'confirmar', 'guardar preferencias',
+      'guardar selección',
+      // Italian
+      'salva', 'conferma', 'salva preferenze',
+      // Dutch
+      'opslaan', 'bevestigen', 'voorkeuren opslaan',
+    ];
+
+    // Find and click reject button first
+    for (const text of rejectTexts) {
+      const btn = Utils.findByText(text, document, 'button, a, span, div');
+      if (btn) {
+        btn.click();
+        rejected++;
         return { rejected, vendorsUnticked };
-      },
-    },
+      }
+    }
 
-    // ──────────────── Generic (fallback) ────────────────────────
-    generic: {
-      detect() {
-        return CMPDetector.detectGeneric();
-      },
+    // Strategy 2: Banner already shows checkboxes and a save/confirm button.
+    // This handles custom cookie overlays (e.g. thomas-krenn.com, many German
+    // sites) where the banner presents category toggles directly with a
+    // "save selection" button, no reject-all button, and no preferences screen.
+    {
+      // Find cookie/privacy overlays (fixed position or modal)
+      const cookieOverlays = document.querySelectorAll(
+        '[class*="privacy-cookie"], [class*="cookie-overlay"], ' +
+        '[class*="cookie-consent"], [class*="cookie-banner"], ' +
+        '[id*="CookiePolicy"], [role="dialog"]'
+      );
+      for (const overlay of cookieOverlays) {
+        // Untick all non-essential toggles in this overlay
+        const unticked = await Utils.untickAllToggles(overlay);
+        if (unticked > 0) {
+          vendorsUnticked += unticked;
+        }
 
-      async reject() {
-        let rejected = 0;
-        let vendorsUnticked = 0;
-
-        // Common reject button text patterns (lowercase, for matching)
-        const rejectTexts = [
-          'reject all', 'reject', 'decline', 'deny', 'deny all',
-          'do not consent', 'do not sell', 'do not accept',
-          'only necessary', 'essential only', 'refuse',
-          'i refuse', 'no thanks', 'no, thanks',
-          'opt out', 'opt-out', 'disagree',
-          'continue without accepting', 'manage choices',
-          'necessary cookies only', 'strictly necessary only',
-          'accept only essential', 'accept required',
-          // German
-          'ablehnen', 'alle ablehnen', 'nur notwendige',
-          'nur erforderliche', 'notwendige cookies',
-          'alle ablehnen', 'ablehnen alle',
-          'nicht akzeptieren', 'nicht zustimmen',
-          'notwendig akzeptieren',
-          // French
-          'tout refuser', 'refuser', 'refuser tout',
-          'seulement nécessaires', 'cookies nécessaires',
-          // Spanish
-          'rechazar todo', 'rechazar', 'solo necesarias',
-          'solo cookies necesarias',
-          // Italian
-          'rifiuta tutto', 'rifiuta', 'solo necessari',
-          // Dutch
-          'weiger alles', 'weigeren', 'alleen noodzakelijk',
-        ];
-
-        // Common manage/preferences text patterns
-        const prefsTexts = [
-          'manage preferences', 'manage options', 'manage cookies',
-          'cookie settings', 'privacy settings', 'more options',
-          'more information', 'customise', 'customize',
-          'learn more', 'view preferences', 'edit preferences',
-          'change settings', 'choose cookies', 'preferences',
-          // German
-          'datenschutzeinstellungen', 'cookie-einstellungen',
-          'eigene einstellungen', 'einstellungen verwalten',
-          'cookie einstellungen', 'weitere informationen',
-          // French
-          'paramètres des cookies', 'gérer les cookies',
-          'personnaliser', 'paramètres de confidentialité',
-          // Spanish
-          'configuración de cookies', 'gestionar cookies',
-          'configurar', 'ajustes de privacidad',
-        ];
-
-        // Common save/confirm text patterns
-        const saveTexts = [
-          'save preferences', 'save choices', 'save settings',
-          'save my choices', 'save your choices', 'save',
-          'confirm choices', 'confirm my choices', 'confirm',
-          'update preferences', 'apply',
-          // German
-          'auswahl übernehmen', 'auswahl speichern',
-          'einstellungen speichern', 'speichern', 'bestätigen',
-          'auswahl bestätigen', 'übernehmen',
-          // French
-          'enregistrer', 'confirmer', 'valider',
-          'sauvegarder les choix', 'enregistrer les préférences',
-          // Spanish
-          'guardar', 'confirmar', 'guardar preferencias',
-          'guardar selección',
-          // Italian
-          'salva', 'conferma', 'salva preferenze',
-          // Dutch
-          'opslaan', 'bevestigen', 'voorkeuren opslaan',
-        ];
-
-        // Find and click reject button first
-        for (const text of rejectTexts) {
-          const btn = Utils.findByText(text, document, 'button, a, span, div');
-          if (btn) {
-            btn.click();
+        // Try to find a save/confirm button
+        for (const sText of saveTexts) {
+          const sBtn = Utils.findByText(sText, overlay, 'button, a');
+          if (sBtn) {
+            sBtn.click();
             rejected++;
             return { rejected, vendorsUnticked };
           }
         }
 
-        // Strategy 2: Banner already shows checkboxes and a save/confirm button.
-        // This handles custom cookie overlays (e.g. thomas-krenn.com, many German
-        // sites) where the banner presents category toggles directly with a
-        // "save selection" button, no reject-all button, and no preferences screen.
-        {
-          // Find cookie/privacy overlays (fixed position or modal)
-          const cookieOverlays = document.querySelectorAll(
-            '[class*="privacy-cookie"], [class*="cookie-overlay"], ' +
-            '[class*="cookie-consent"], [class*="cookie-banner"], ' +
-            '[id*="CookiePolicy"], [role="dialog"]'
-          );
-          for (const overlay of cookieOverlays) {
-            // Untick all non-essential toggles in this overlay
-            const unticked = await Utils.untickAllToggles(overlay);
-            if (unticked > 0) {
-              vendorsUnticked += unticked;
-            }
+        // Also try data-attribute based save buttons (common in custom CMPs)
+        const attrSaveBtn = overlay.querySelector(
+          '[data-cookie-overlay-save], [data-cookie-save], ' +
+          '[data-consent-save], [data-save-settings]'
+        );
+        if (attrSaveBtn) {
+          attrSaveBtn.click();
+          rejected++;
+          return { rejected, vendorsUnticked };
+        }
+      }
+    }
 
-            // Try to find a save/confirm button
-            for (const sText of saveTexts) {
-              const sBtn = Utils.findByText(sText, overlay, 'button, a');
-              if (sBtn) {
-                sBtn.click();
-                rejected++;
-                return { rejected, vendorsUnticked };
-              }
-            }
+    // If no direct reject button, try opening preferences
+    for (const text of prefsTexts) {
+      const btn = Utils.findByText(text, document, 'button, a, span');
+      if (btn) {
+        btn.click();
+        await Utils.sleep(CONFIG.dynamicLoadDelay);
 
-            // Also try data-attribute based save buttons (common in custom CMPs)
-            const attrSaveBtn = overlay.querySelector(
-              '[data-cookie-overlay-save], [data-cookie-save], ' +
-              '[data-consent-save], [data-save-settings]'
-            );
-            if (attrSaveBtn) {
-              attrSaveBtn.click();
-              rejected++;
-              return { rejected, vendorsUnticked };
-            }
+        // After opening preferences, try to find reject-all or untick toggles
+        // First try reject-all again
+        for (const rText of rejectTexts) {
+          const rBtn = Utils.findByText(rText, document, 'button, a, span, div');
+          if (rBtn) {
+            rBtn.click();
+            rejected++;
+            return { rejected, vendorsUnticked };
           }
         }
 
-        // If no direct reject button, try opening preferences
-        for (const text of prefsTexts) {
-          const btn = Utils.findByText(text, document, 'button, a, span');
-          if (btn) {
-            btn.click();
-            await Utils.sleep(CONFIG.dynamicLoadDelay);
+        // Untick all toggles
+        const modals = document.querySelectorAll(
+          '[role="dialog"], [class*="modal"], [class*="popup"], [class*="overlay"]'
+        );
+        for (const modal of modals) {
+          const result = await Utils.untickAllToggles(modal);
+          vendorsUnticked += result;
 
-            // After opening preferences, try to find reject-all or untick toggles
-            // First try reject-all again
-            for (const rText of rejectTexts) {
-              const rBtn = Utils.findByText(rText, document, 'button, a, span, div');
-              if (rBtn) {
-                rBtn.click();
-                rejected++;
-                return { rejected, vendorsUnticked };
-              }
-            }
-
-            // Untick all toggles
-            const modals = document.querySelectorAll(
-              '[role="dialog"], [class*="modal"], [class*="popup"], [class*="overlay"]'
-            );
-            for (const modal of modals) {
-              const result = await Utils.untickAllToggles(modal);
-              vendorsUnticked += result;
-
-              // Try to find and scroll vendor lists
-              const scrollContainers = modal.querySelectorAll(
-                '[class*="vendor-list"], [class*="vendor-list-container"], [class*="scroll"]'
-              );
-              for (const sc of scrollContainers) {
-                await Utils.scrollToLoadAll(sc);
-                const vendorResult = await Utils.untickAllToggles(sc);
-                vendorsUnticked += vendorResult;
-              }
-            }
-
-            // Save
-            for (const sText of saveTexts) {
-              const sBtn = Utils.findByText(sText, document, 'button, a');
-              if (sBtn) {
-                sBtn.click();
-                rejected++;
-                break;
-              }
-            }
-
-            break; // only try the first matching preferences button
+          // Try to find and scroll vendor lists
+          const scrollContainers = modal.querySelectorAll(
+            '[class*="vendor-list"], [class*="vendor-list-container"], [class*="scroll"]'
+          );
+          for (const sc of scrollContainers) {
+            await Utils.scrollToLoadAll(sc);
+            const vendorResult = await Utils.untickAllToggles(sc);
+            vendorsUnticked += vendorResult;
           }
         }
 
-        // Last resort: dismiss overlay by clicking outside or close button
-        if (rejected === 0) {
-          const closeBtns = document.querySelectorAll(
-            '[class*="close"][class*="banner"], [class*="dismiss"], [aria-label="close"], [class*="cookie"] [class*="close"]'
-          );
-          for (const btn of closeBtns) {
-            btn.click();
+        // Save
+        for (const sText of saveTexts) {
+          const sBtn = Utils.findByText(sText, document, 'button, a');
+          if (sBtn) {
+            sBtn.click();
             rejected++;
             break;
           }
         }
 
-        return { rejected, vendorsUnticked };
-      },
-    },
-  };
+        break; // only try the first matching preferences button
+      }
+    }
+
+    // Last resort: more targeted close buttons -- require explicit
+    // cookie/consent/privacy context to avoid closing unrelated UI.
+    if (rejected === 0) {
+      const closeBtns = document.querySelectorAll(
+        '[class*="cookie-banner"] [aria-label="close"], ' +
+        '[class*="cookie-consent"] [aria-label="close"], ' +
+        '[class*="consent-banner"] [aria-label="close"], ' +
+        '[class*="cookie-popup"] [aria-label="close"], ' +
+        '[id*="cookie"] [class*="close"][aria-label], ' +
+        'button[class*="cookie-close"], ' +
+        'button[class*="consent-close"]'
+      );
+      for (const btn of closeBtns) {
+        if (Utils.isVisible(btn)) {
+          btn.click();
+          rejected++;
+          break;
+        }
+      }
+    }
+
+    return { rejected, vendorsUnticked };
+  });
+
 
   // ─── TCF API Handler ────────────────────────────────────────────────
   // Uses IAB TCF v2 API to programmatically reject consent
@@ -1708,6 +1672,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     observerActive: false,
     initTimestamp: Date.now(),
     lastFailedAttempt: 0,
+    _settingsLoaded: false,
     settings: {
       autoReject: true,
       untickVendors: true,
@@ -1737,6 +1702,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
             }
           }
         }
+        this._settingsLoaded = true;
       });
 
       // Check whitelist (non-blocking)
@@ -1756,6 +1722,15 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     },
 
     async detectAndReject() {
+      // Wait for settings to load before starting detection (max 2s)
+      if (!this._settingsLoaded) {
+        const settingsDeadline = Date.now() + CONFIG.settingsWaitTimeout;
+        while (!this._settingsLoaded && Date.now() < settingsDeadline) {
+          await Utils.sleep(50);
+        }
+        this._settingsLoaded = true; // proceed anyway after timeout
+      }
+
       // Immediate check
       const cmp = CMPDetector.detect();
       if (cmp) {
@@ -1771,7 +1746,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       // mutations per second during load, which was exhausting the shared
       // retries counter before the banner even appeared.
       //
-      // Throttled to fire at most once every 300ms. Without this,
+      // Throttled to fire at most once every CONFIG.observerThrottle ms. Without this,
       // detect() runs 30+ querySelector calls + getComputedStyle on
       // every single DOM mutation -- extremely expensive during page load.
       this.observerActive = true;
@@ -1782,7 +1757,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
           return;
         }
         const now = Date.now();
-        if (now - lastObserverDetect < 300) return; // throttle
+        if (now - lastObserverDetect < CONFIG.observerThrottle) return; // throttle
         lastObserverDetect = now;
 
         const cmp = CMPDetector.detect();
@@ -1797,6 +1772,15 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         childList: true,
         subtree: true,
       });
+
+      // Safety net: force-disconnect observer after a timeout
+      setTimeout(() => {
+        if (this.observerActive) {
+          this.observerActive = false;
+          this.observer.disconnect();
+          DebugLog.log('Observer safety timeout reached');
+        }
+      }, CONFIG.observerTimeout);
 
       // Also try at intervals as a safety net (catches banners loaded
       // after the observer's initial watch window, or in tricky iframes)
@@ -1839,7 +1823,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       // Cooldown: if the last attempt failed verification, wait before
       // retrying. This prevents tight retry loops clicking the same
       // non-functional button every 500ms.
-      if (this.lastFailedAttempt && (Date.now() - this.lastFailedAttempt < 3000)) {
+      if (this.lastFailedAttempt && (Date.now() - this.lastFailedAttempt < CONFIG.failedCooldown)) {
         return;
       }
 
@@ -1848,6 +1832,12 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
 
       // Verify detection
       if (!handler.detect()) return;
+
+      // Verify the banner element is actually visible (not just the JS global)
+      if (!this.isCMPBannerVisible(cmpInfo.id)) {
+        DebugLog.log('CMP detected via global but banner not visible, skipping:', cmpInfo.name);
+        return;
+      }
 
       this.currentCMP = cmpInfo;
       DebugLog.log('Detected CMP:', cmpInfo.name, 'on', this.getDomain());
@@ -1858,7 +1848,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         // via async JavaScript. Without this wait, we click buttons that
         // have no event listeners yet -- the click does nothing, but we
         // count it as a success and mark processed=true.
-        await Utils.sleep(800);
+        await Utils.sleep(CONFIG.preRejectDelay);
 
         // Run the CMP-specific rejection
         const result = await handler.reject();
@@ -1895,6 +1885,8 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         // Report results
         if (result.rejected > 0 || result.vendorsUnticked > 0 || tcfResult) {
           this.processed = true;
+          // Invalidate detection cache -- page state changed after rejection
+          CMPDetector._lastDetection = null;
 
           const domain = this.getDomain();
           // Strip query params and hash from URL for privacy
@@ -1915,6 +1907,50 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       } catch (e) {
         DebugLog.error('Error handling CMP:', e.message);
       }
+    },
+
+    /**
+     * Check if a CMP's primary banner element is actually visible.
+     * Used to guard against false positives when detect() returns true
+     * from a window global (e.g. window.OneTrust) but the banner is
+     * already dismissed/hidden.
+     */
+    isCMPBannerVisible(cmpId) {
+      const primarySelectors = {
+        onetrust: '#onetrust-banner-sdk',
+        fides: '#fides-banner-container, #fides-banner',
+        ketch: '#ketch-consent-banner, #ketch-banner',
+        cookiebot: '#CybotCookiebotDialog',
+        didomi: '#didomi-popup',
+        sourcepoint: '.sp_message_container, [class*="sp_veil"]',
+        trustarc: '#truste-consent-track, .trustarc-banner',
+        quantcast: '.qc-cmp2-container',
+        usercentrics: '#usercentrics-root',
+        cookieyes: '.cky-consent-bar',
+        iubenda: '.iubenda-cs-banner',
+        consentmanager: '#cmpbox',
+        sirdata: '#sd-cmp',
+        ezcookie: '#ez-cookie-dialog',
+        borlabs: '#BorlabsCookieBox',
+        lgcookieslaw: '#lgcookieslaw_banner',
+      };
+
+      const sel = primarySelectors[cmpId];
+      if (!sel) {
+        // Unknown CMP -- no selector to check, assume visible
+        return true;
+      }
+
+      const el = document.querySelector(sel);
+      if (!el) {
+        // No DOM element found for this CMP's known selector.
+        // The detection may have come from a window global only,
+        // so we can't confirm visibility via DOM -- assume visible
+        // and let existing logic handle it.
+        return true;
+      }
+
+      return Utils.isVisible(el);
     },
 
     /**
@@ -2010,6 +2046,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
           timestamp: Engine.initTimestamp,
         });
       } else if (message.type === 'FORCE_REJECT') {
+        DebugLog.log('Force reject triggered (manual override)');
         Engine.processed = false;
         Engine.intervalRetries = 0;
         Engine.lastFailedAttempt = 0;

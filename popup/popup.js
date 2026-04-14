@@ -43,6 +43,11 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     });
   }
 
+  function escapeHTML(str) {
+    if (!str) return '';
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
   function formatTimestamp(ts) {
     if (!ts) return '';
     const d = new Date(ts);
@@ -84,6 +89,17 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
         tab.classList.add('active');
         $('tab-' + tab.dataset.tab).classList.add('active');
+
+        // Refresh data when switching tabs (Fix #19)
+        const tabName = tab.dataset.tab;
+        if (tabName === 'dashboard') {
+          loadStats();
+          loadCurrentSite();
+        } else if (tabName === 'activity') {
+          loadActivity();
+        } else if (tabName === 'lists') {
+          loadLists();
+        }
       });
     });
   }
@@ -111,9 +127,16 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     const tabInfo = await sendMessage({ type: 'GET_CURRENT_TAB_INFO' });
     if (!tabInfo || !tabInfo.domain) {
       $('siteDomain').textContent = 'Not a web page';
-      updateStatus('inactive', 'N/A');
+      updateStatus('inactive', 'CookieReject only works on websites');
+      // Disable action buttons on non-web pages (Fix #20)
+      $('rejectNowBtn').disabled = true;
+      $('whitelistBtn').disabled = true;
       return;
     }
+
+    // Re-enable buttons for valid web pages (Fix #20)
+    $('rejectNowBtn').disabled = false;
+    $('whitelistBtn').disabled = false;
 
     $('siteDomain').textContent = tabInfo.domain;
 
@@ -174,24 +197,38 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
 
   // ─── Activity ──────────────────────────────────────────────────────
 
-  async function loadActivity() {
-    const log = await sendMessage({ type: 'GET_LOG', limit: 30 });
+  // Fix #23: pagination state
+  let activityLimit = 30;
+
+  async function loadActivity(loadMore = false) {
+    if (!loadMore) activityLimit = 30;
+    else activityLimit += 30;
+
+    const log = await sendMessage({ type: 'GET_LOG', limit: activityLimit });
     const container = $('activityList');
 
     if (!log || log.length === 0) {
       container.innerHTML = '<div class="empty-state">No activity yet</div>';
+      $('loadMoreBtn').style.display = 'none';
       return;
     }
 
+    // Fix #22: show vendorsUnticked badge; background.js LOG_ACTION already stores it
     container.innerHTML = log.map(entry => `
       <div class="activity-item">
         <div>
-          <div class="activity-domain" title="${entry.domain}">${entry.domain}</div>
-          <span class="activity-cmp">${entry.cmp || 'Unknown'}</span>
+          <div class="activity-domain" title="${escapeHTML(entry.domain)}">${escapeHTML(entry.domain)}</div>
+          <div class="activity-meta">
+            <span class="activity-cmp">${escapeHTML(entry.cmp || 'Unknown')}</span>
+            ${entry.vendorsUnticked ? '<span class="activity-badge">' + entry.vendorsUnticked + ' vendors</span>' : ''}
+          </div>
         </div>
         <span class="activity-time">${formatTimestamp(entry.timestamp)}</span>
       </div>
     `).join('');
+
+    // Fix #23: show/hide "Load more" button
+    $('loadMoreBtn').style.display = log.length >= activityLimit ? 'block' : 'none';
   }
 
   // ─── Lists ─────────────────────────────────────────────────────────
@@ -218,8 +255,8 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
 
     container.innerHTML = items.map(item => `
       <div class="list-item">
-        <span class="list-item-domain">${item.domain}</span>
-        <button class="list-item-remove" data-list="${type}" data-domain="${item.domain}" title="Remove">&times;</button>
+        <span class="list-item-domain">${escapeHTML(item.domain)}</span>
+        <button class="list-item-remove" data-list="${type}" data-domain="${escapeHTML(item.domain)}" title="Remove">&times;</button>
       </div>
     `).join('');
   }
@@ -330,9 +367,30 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
 
   // ─── Reset Stats ───────────────────────────────────────────────────
 
+  // Fix #21: themed confirm dialog replacing native confirm()
+  function showConfirm(message) {
+    return new Promise((resolve) => {
+      $('confirmMessage').textContent = message;
+      $('confirmModal').classList.add('active');
+
+      const cleanup = () => {
+        $('confirmModal').classList.remove('active');
+        $('confirmOk').removeEventListener('click', onOk);
+        $('confirmCancel').removeEventListener('click', onCancel);
+      };
+
+      const onOk = () => { cleanup(); resolve(true); };
+      const onCancel = () => { cleanup(); resolve(false); };
+
+      $('confirmOk').addEventListener('click', onOk);
+      $('confirmCancel').addEventListener('click', onCancel);
+    });
+  }
+
   function initResetStats() {
     $('resetStatsBtn').addEventListener('click', async () => {
-      if (confirm('Reset all statistics and activity? This cannot be undone.')) {
+      const confirmed = await showConfirm('Reset all statistics and activity? This cannot be undone.');
+      if (confirmed) {
         await sendMessage({ type: 'RESET_STATS' });
         await loadStats();
         await loadActivity();
@@ -410,6 +468,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     $('blacklistInput').addEventListener('keydown', (e) => {
       if (e.key === 'Enter') $('addBlacklistBtn').click();
     });
+
+    // Fix #23: Load more activity entries
+    $('loadMoreBtn').addEventListener('click', () => loadActivity(true));
   }
 
   // ─── Smart Polling ─────────────────────────────────────────────────

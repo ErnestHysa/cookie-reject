@@ -8,14 +8,25 @@
 // ─── Cross-Browser Polyfill (inlined for service worker) ────────────
 // Service workers can only load a single file in Manifest V3,
 // so the polyfill is inlined here instead of loaded separately.
+// This mirrors browser-polyfill.js exactly (using self instead of window).
 {
+  // If chrome is undefined but browser exists (Firefox), alias it
   if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     self.chrome = browser;
-  } else if (typeof chrome !== 'undefined' && typeof browser !== 'undefined') {
+  }
+
+  // If both exist (some Firefox versions have both), ensure chrome.action exists
+  // In Firefox, chrome.action may be undefined while browser.action works
+  if (typeof chrome !== 'undefined' && typeof browser !== 'undefined') {
     if (!chrome.action && browser.action) chrome.action = browser.action;
     if (!chrome.tabs && browser.tabs) chrome.tabs = browser.tabs;
     if (!chrome.runtime && browser.runtime) chrome.runtime = browser.runtime;
     if (!chrome.storage && browser.storage) chrome.storage = browser.storage;
+  }
+
+  // If neither exists (unlikely, but defensive)
+  if (typeof chrome === 'undefined' && typeof browser === 'undefined') {
+    console.warn('[CookieReject] No extension API found. Running in non-extension context.');
   }
 }
 
@@ -219,7 +230,7 @@
     },
 
     calculateTimeSaved(stats) {
-      const siteTime = (stats.totalSitesProtected || 0) * 47;
+      const siteTime = (stats.totalUniqueSites || 0) * 47;
       const vendorTime = (stats.totalVendorsUnticked || 0) * 2;
       return siteTime + vendorTime;
     },
@@ -425,10 +436,102 @@
       };
     },
 
+    validateImportData(key, value) {
+      // cr_stats: object with non-negative integer numeric values
+      if (key === STORAGE_KEYS.STATS) {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) {
+          return { valid: false, sanitizedValue: null };
+        }
+        for (const [k, v] of Object.entries(value)) {
+          if (typeof v === 'number' && (!Number.isInteger(v) || v < 0)) {
+            return { valid: false, sanitizedValue: null };
+          }
+        }
+        return { valid: true, sanitizedValue: value };
+      }
+
+      // cr_log: array of entries with domain (string), timestamp (number), cmp (string or undefined)
+      if (key === STORAGE_KEYS.LOG) {
+        if (!Array.isArray(value)) {
+          return { valid: false, sanitizedValue: null };
+        }
+        const sanitized = value.filter(entry => {
+          if (!entry || typeof entry !== 'object') return false;
+          if (typeof entry.domain !== 'string') return false;
+          if (typeof entry.timestamp !== 'number') return false;
+          if (entry.cmp !== undefined && typeof entry.cmp !== 'string') return false;
+          return true;
+        });
+        return { valid: true, sanitizedValue: sanitized };
+      }
+
+      // cr_whitelist / cr_blacklist: arrays of objects with domain (string) and timestamp (number)
+      if (key === STORAGE_KEYS.WHITELIST || key === STORAGE_KEYS.BLACKLIST) {
+        if (!Array.isArray(value)) {
+          return { valid: false, sanitizedValue: null };
+        }
+        const sanitized = value.filter(entry => {
+          if (!entry || typeof entry !== 'object') return false;
+          if (typeof entry.domain !== 'string') return false;
+          if (typeof entry.timestamp !== 'number') return false;
+          return true;
+        });
+        return { valid: true, sanitizedValue: sanitized };
+      }
+
+      // cr_settings: object with boolean values for known settings keys
+      if (key === STORAGE_KEYS.SETTINGS) {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) {
+          return { valid: false, sanitizedValue: null };
+        }
+        const sanitized = {};
+        for (const [k, v] of Object.entries(value)) {
+          if (typeof v === 'boolean') {
+            sanitized[k] = v;
+          }
+        }
+        return { valid: true, sanitizedValue: sanitized };
+      }
+
+      // cr_unique_domains: array of strings
+      if (key === STORAGE_KEYS.UNIQUE_DOMAINS) {
+        if (!Array.isArray(value)) {
+          return { valid: false, sanitizedValue: null };
+        }
+        const sanitized = value.filter(item => typeof item === 'string');
+        return { valid: true, sanitizedValue: sanitized };
+      }
+
+      // cr_meta: object with version (string) and numeric timestamps
+      if (key === STORAGE_KEYS.META) {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) {
+          return { valid: false, sanitizedValue: null };
+        }
+        if (typeof value.version !== 'string') {
+          return { valid: false, sanitizedValue: null };
+        }
+        // Check that any timestamp-like keys are numbers
+        for (const [k, v] of Object.entries(value)) {
+          if (k.toLowerCase().includes('date') || k.toLowerCase().includes('timestamp')) {
+            if (typeof v !== 'number') {
+              return { valid: false, sanitizedValue: null };
+            }
+          }
+        }
+        return { valid: true, sanitizedValue: value };
+      }
+
+      // Unknown cr_ key: allow through with no special validation
+      return { valid: true, sanitizedValue: value };
+    },
+
     async importData(jsonString) {
       try {
         const parsed = JSON.parse(jsonString);
-        if (!parsed.data || typeof parsed.data !== 'object') {
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          return { success: false, error: 'Invalid format: top-level value must be an object' };
+        }
+        if (!parsed.data || typeof parsed.data !== 'object' || Array.isArray(parsed.data)) {
           return { success: false, error: 'Invalid format: missing data object' };
         }
 
@@ -440,15 +543,22 @@
           return { success: false, error: 'Invalid format: unexpected keys' };
         }
 
-        // Import each key
+        // Import each key with validation
+        let validCount = 0;
         for (const [key, value] of Object.entries(parsed.data)) {
-          await Storage.set(key, value);
+          const { valid, sanitizedValue } = this.validateImportData(key, value);
+          if (valid) {
+            await Storage.set(key, sanitizedValue);
+            validCount++;
+          } else {
+            debugLog('Import skipped invalid key:', key);
+          }
         }
 
         // Re-run migration to ensure schema consistency
         await Migration.run();
 
-        return { success: true, keysImported: keys.length };
+        return { success: true, keysImported: validCount };
       } catch (e) {
         return { success: false, error: e.message };
       }

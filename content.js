@@ -1498,10 +1498,11 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   // ─── Main Engine ────────────────────────────────────────────────────
   const Engine = {
     initialized: false,
-    retries: 0,
+    intervalRetries: 0,
     processed: false,
     currentCMP: null,
     observer: null,
+    observerActive: false,
     initTimestamp: Date.now(),
 
     async init() {
@@ -1532,21 +1533,22 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         return;
       }
 
-      // Set up MutationObserver for dynamic banner injection
-      this.observer = new MutationObserver((mutations) => {
-        if (this.processed) {
-          this.observer.disconnect();
-          return;
-        }
-
-        this.retries++;
-        if (this.retries > CONFIG.maxRetries) {
+      // Set up MutationObserver for dynamic banner injection.
+      // The observer does NOT use the retries counter -- it stays active
+      // for the entire watch window. DOM pages can produce hundreds of
+      // mutations per second during load, which was exhausting the shared
+      // retries counter before the banner even appeared.
+      this.observerActive = true;
+      this.observer = new MutationObserver(() => {
+        if (this.processed || !this.observerActive) {
           this.observer.disconnect();
           return;
         }
 
         const cmp = CMPDetector.detect();
         if (cmp) {
+          this.observerActive = false;
+          this.observer.disconnect();
           this.handleCMP(cmp);
         }
       });
@@ -1556,22 +1558,36 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         subtree: true,
       });
 
-      // Also try at intervals (catches delayed/async banner loads)
+      // Also try at intervals as a safety net (catches banners loaded
+      // after the observer's initial watch window, or in tricky iframes)
       const intervalId = setInterval(async () => {
         if (this.processed) {
           clearInterval(intervalId);
+          if (this.observerActive) {
+            this.observerActive = false;
+            this.observer.disconnect();
+          }
           return;
         }
 
-        this.retries++;
-        if (this.retries > CONFIG.maxRetries) {
+        this.intervalRetries++;
+        if (this.intervalRetries > CONFIG.maxRetries) {
           clearInterval(intervalId);
+          // Stop the observer too -- we've waited long enough
+          if (this.observerActive) {
+            this.observerActive = false;
+            this.observer.disconnect();
+          }
           return;
         }
 
         const cmp = CMPDetector.detect();
         if (cmp) {
           clearInterval(intervalId);
+          if (this.observerActive) {
+            this.observerActive = false;
+            this.observer.disconnect();
+          }
           await this.handleCMP(cmp);
         }
       }, CONFIG.retryInterval);
@@ -1665,7 +1681,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         });
       } else if (message.type === 'FORCE_REJECT') {
         Engine.processed = false;
-        Engine.retries = 0;
+        Engine.intervalRetries = 0;
         Engine.detectAndReject();
         sendResponse({ started: true });
       } else if (message.type === 'WHITELIST_SITE') {

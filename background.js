@@ -190,18 +190,12 @@
   };
 
   // Simple promise queue to serialize storage read-modify-write operations
-  const _storageQueue = Promise.resolve();
+  let _storageQueue = Promise.resolve();
 
   // ─── Stats Management ───────────────────────────────────────────────
   const StatsManager = {
     async get() {
-      const stored = await Storage.get(STORAGE_KEYS.STATS, DEFAULT_STATS);
-      const { data } = Migration.mergeWithDefaults(stored, DEFAULT_STATS);
-      if (!data.installDate) {
-        data.installDate = Date.now();
-        await Storage.set(STORAGE_KEYS.STATS, data);
-      }
-      return data;
+      return await Storage.get(STORAGE_KEYS.STATS, DEFAULT_STATS);
     },
 
     async update(updates) {
@@ -219,7 +213,10 @@
         }
         await Storage.set(STORAGE_KEYS.STATS, stats);
         return stats;
-      }).catch(e => console.error('Storage operation failed:', e));
+      }).catch(e => {
+        console.error('Storage operation failed:', e);
+        return this.get();
+      });
     },
 
     async reset() {
@@ -341,36 +338,40 @@
     },
 
     async addEntry(listName, domain) {
-      const baseDomain = this.extractBaseDomain(domain);
-      if (!baseDomain) return false;
+      return _storageQueue = _storageQueue.then(async () => {
+        const baseDomain = this.extractBaseDomain(domain);
+        if (!baseDomain) return false;
 
-      const list = await this.getList(listName);
+        const list = await this.getList(listName);
 
-      const exists = list.some(entry =>
-        this.domainMatches(baseDomain, entry.domain)
-      );
-      if (exists) return false;
+        const exists = list.some(entry =>
+          this.domainMatches(baseDomain, entry.domain)
+        );
+        if (exists) return false;
 
-      list.push({
-        domain: baseDomain,
-        addedAt: Date.now(),
-        source: 'user',
-      });
+        list.push({
+          domain: baseDomain,
+          addedAt: Date.now(),
+          source: 'user',
+        });
 
-      await this.setList(listName, list);
-      return true;
+        await this.setList(listName, list);
+        return true;
+      }).catch(e => console.error('ListManager.addEntry failed:', e));
     },
 
     async removeEntry(listName, domain) {
-      const storageKey = listName === 'whitelist' ? STORAGE_KEYS.WHITELIST : STORAGE_KEYS.BLACKLIST;
-      let list = await this.getList(listName);
-      const before = list.length;
-      list = list.filter(e => !this.domainMatches(domain, e.domain));
-      if (list.length < before) {
-        await Storage.set(storageKey, list);
-        return true;
-      }
-      return false;
+      return _storageQueue = _storageQueue.then(async () => {
+        const storageKey = listName === 'whitelist' ? STORAGE_KEYS.WHITELIST : STORAGE_KEYS.BLACKLIST;
+        let list = await this.getList(listName);
+        const before = list.length;
+        list = list.filter(e => !this.domainMatches(domain, e.domain));
+        if (list.length < before) {
+          await Storage.set(storageKey, list);
+          return true;
+        }
+        return false;
+      }).catch(e => console.error('ListManager.removeEntry failed:', e));
     },
 
     async checkDomain(domain) {
@@ -822,4 +823,12 @@
   Migration.run().catch(e => console.error('Migration failed:', e));
   Badge.update().catch(e => console.error('Badge update failed:', e));
   loadDebugMode().catch(e => console.error('Debug mode load failed:', e));
+
+  // Initialize log ID counter from existing data to prevent collisions after SW restart
+  (async () => {
+    try {
+      const log = await Storage.get(STORAGE_KEYS.LOG, []);
+      LogManager._idCounter = log.length > 0 ? log.length : 0;
+    } catch (e) { /* ignore */ }
+  })();
 })();

@@ -9,6 +9,12 @@
  * isValidLogEntry are re-implemented here rather than imported from
  * background.js / content.js because Manifest V3 extensions don't use ES
  * modules. If the source implementations change, update these copies too.
+ * 
+ * SYNC CHECKLIST: When updating source, verify these match:
+ *   - extractBaseDomain() <-> background.js ListManager.extractBaseDomain
+ *   - domainMatches() <-> background.js ListManager.domainMatches  
+ *   - escapeHTML() <-> content.js Utils.escapeHTML / popup.js escapeHTML
+ *   - isValidLogEntry() <-> background.js import validator logic
  */
 
 let passed = 0;

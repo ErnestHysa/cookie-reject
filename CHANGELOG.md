@@ -2,6 +2,38 @@
 
 All notable changes to CookieReject will be documented in this file.
 
+## [1.5.0] - 2026-04-14
+
+### Fixed (CRITICAL)
+- #1: `const _storageQueue` caused TypeError in strict mode, silently breaking ALL stats, logging, and domain tracking since v1.4.0. Changed to `let`.
+
+### Fixed (HIGH)
+- #2: ListManager addEntry/removeEntry not serialized -- wrapped with storage queue to prevent TOCTOU race conditions
+- #3: `_detecting` flag could permanently stick if exception occurred in detectAndReject -- wrapped in try/finally
+- #4: Observer callback called handleCMP without await, causing concurrent double-rejections -- added `_handling` re-entry guard with try/finally
+- #5: whitelistBtn retained stale "Remove from Whitelist" label when switching to non-whitelisted site -- now resets on each load
+- #6: TCF addEventListener listener leaked on failure -- removeEventListener now always called; added double-resolve protection
+
+### Fixed (MEDIUM)
+- #7: intervalId not cleared when settings/whitelist disables engine early -- added cleanup in both early-return paths
+- #8: Shadow host cache never refreshed for dynamic pages -- added 5-second TTL invalidation
+- #9: Utils.click() didn't check element visibility before clicking -- added isVisible() guard
+- #10: getDomain() returned empty string for file:// URLs -- returns full href for non-HTTP protocols
+- #11: findByText partial matching could click wrong elements -- added consent-context verification via closest()
+- #12: BannerHider scroll-lock selector too broad -- narrowed to specific overlay/banner class patterns
+- #13: Guard property accumulated across extension updates -- cleanup loop removes old __cookieReject_* properties
+- #14: StatsManager.increment returned undefined on failure -- now returns current stats as fallback
+
+### Fixed (LOW)
+- #15: LogManager._idCounter reset on service worker restart -- initialized from stored log length
+- #16: Removed conflicting word-break:break-all from .activity-domain CSS (was dead code vs nowrap+ellipsis)
+- #17: StatsManager.get() double-merged defaults -- simplified to single Storage.get with defaults
+- #18: Test file sync checklist added -- lists specific functions and their source locations
+- #19: pollInterval not nulled after clearInterval -- added null assignment
+- #21: Added top-level try/catch in content.js IIFE for fatal error logging
+
+Bumped version: 1.4.0 -> 1.5.0
+
 ## [1.4.0] - 2026-04-14
 
 ### Fixed (HIGH)

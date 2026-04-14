@@ -187,6 +187,10 @@
       return;
     }
 
+    // Reset whitelist button for non-whitelisted sites (Fix #5)
+    $('whitelistBtn').textContent = 'Whitelist';
+    $('whitelistBtn').removeAttribute('data-action');
+
     // Check content script status
     const status = await sendTabMessage({ type: 'GET_STATUS_CONTENT' });
     if (!status || !status.active) {
@@ -581,12 +585,14 @@
       // Stop polling after max attempts or if processed
       if (pollCount >= maxPolls) {
         clearInterval(pollInterval);
+        pollInterval = null;
         return;
       }
 
       const statusText = document.querySelector('.status-text').textContent;
       if (statusText.startsWith('Rejected') || statusText.startsWith('No banner')) {
         clearInterval(pollInterval);
+        pollInterval = null;
       }
     }, 2000);
   }

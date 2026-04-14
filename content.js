@@ -13,6 +13,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
 
 (function () {
   'use strict';
+  try {
 
   // ─── Prevent double-injection and skip non-top frames ──────────────
   // Cookie consent banners always live in the top-level frame. Running
@@ -23,6 +24,12 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   const _guardProp = '__cookieReject_' + (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.getManifest ? chrome.runtime.getManifest().version.replace(/\./g, '_') : 'unknown');
   if (window[_guardProp]) return;
   window[_guardProp] = true;
+  // Clean up guard properties from older versions
+  for (const key of Object.keys(window)) {
+    if (key.startsWith('__cookieReject_') && key !== _guardProp) {
+      delete window[key];
+    }
+  }
   if (window !== window.top) return;
 
   // ─── Debug Logging ──────────────────────────────────────────────────
@@ -133,6 +140,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
           ? root.querySelector(selectorOrElement)
           : selectorOrElement;
       if (!el) return false;
+      if (!Utils.isVisible(el)) return false;
       el.scrollIntoView({ block: 'center', behavior: 'instant' });
       const dispatched = el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
       return dispatched;
@@ -268,6 +276,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     _lastDetection: null,
     _lastDetectionTime: 0,
     _cacheTTL: 1000, // 1 second
+    _shadowHostsTimestamp: 0,
 
     /**
      * Detect which CMP framework is running on the current page.
@@ -368,12 +377,13 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       }
 
       // Also check inside Shadow DOMs (cache known hosts)
-      if (!this._shadowHosts) {
+      if (!this._shadowHosts || Date.now() - this._shadowHostsTimestamp > 5000) {
         this._shadowHosts = [];
         const all = document.querySelectorAll('*');
         for (const el of all) {
           if (el.shadowRoot) this._shadowHosts.push(el);
         }
+        this._shadowHostsTimestamp = Date.now();
       }
       for (const host of this._shadowHosts) {
         for (const sel of bannerIndicators) {
@@ -1487,6 +1497,13 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
           btnLen = txt.length;
         }
       }
+      // Verify the button is in a cookie/consent context
+      if (btn) {
+        const contextEl = btn.closest('[class*="cookie"], [class*="consent"], [class*="privacy"], [class*="gdpr"], [id*="cookie"], [id*="consent"], [class*="banner"], [class*="popup"], [class*="modal"], [role="dialog"]');
+        if (!contextEl) {
+          btn = null; // Not in a consent context, skip
+        }
+      }
       if (btn) {
         btn.click();
         rejected++;
@@ -1622,22 +1639,20 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       if (typeof window.__tcfapi === 'function') {
         try {
           await new Promise((resolve) => {
+            let resolved = false;
+            const finish = () => { if (!resolved) { resolved = true; resolve(); } };
             window.__tcfapi('addEventListener', 2, (tcData, listenerSuccess) => {
-              if (listenerSuccess) {
-                // Remove our listener to clean up
-                try {
-                  window.__tcfapi('removeEventListener', 2, () => {}, tcData.listenerId);
-                } catch (e) { /* ignore */ }
-                // If CMP hasn't decided yet, try to trigger consent update
-                // by clicking the reject button (handled by our CMP handlers)
-                if (tcData.eventStatus === 'cmpuishown') {
-                  success = true;
-                }
+              // Always remove our listener to prevent leaks
+              try {
+                window.__tcfapi('removeEventListener', 2, () => {}, tcData.listenerId);
+              } catch (e) { /* ignore */ }
+              if (listenerSuccess && tcData.eventStatus === 'cmpuishown') {
+                success = true;
               }
-              resolve();
+              finish();
             });
             // Timeout after 2s if CMP doesn't respond
-            setTimeout(resolve, 2000);
+            setTimeout(finish, 2000);
           });
         } catch (e) { /* ignore */ }
       }
@@ -1696,7 +1711,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
 
       // Remove body scroll lock (only if we can confirm it was set by a cookie overlay)
       const cookieOverlayBlocking = document.querySelector(
-        '[class*="cookie"], [class*="consent"], [class*="privacy-overlay"]'
+        '[class*="cookie-overlay"], [class*="cookie-banner"], [class*="cookie-popup"], [class*="consent-overlay"], [class*="consent-banner"], [class*="privacy-overlay"], [id*="cookie-overlay"], [id*="consent-banner"]'
       );
       if (cookieOverlayBlocking) {
         if (document.body.style.overflow === 'hidden' ||
@@ -1746,6 +1761,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     _whitelistChecked: false,
     _isWhitelisted: false,
     _detecting: false,
+    _handling: false,
     settings: {
       autoReject: true,
       untickVendors: true,
@@ -1773,6 +1789,10 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
               this.observerActive = false;
               this.observer.disconnect();
             }
+            if (this.intervalId) {
+              clearInterval(this.intervalId);
+              this.intervalId = null;
+            }
           }
         }
         this._settingsLoaded = true;
@@ -1788,6 +1808,10 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
             this.observerActive = false;
             this.observer.disconnect();
           }
+          if (this.intervalId) {
+            clearInterval(this.intervalId);
+            this.intervalId = null;
+          }
         }
         this._whitelistChecked = true;
       });
@@ -1799,6 +1823,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     async detectAndReject() {
       if (this._detecting) return;
       this._detecting = true;
+      try {
 
       // Wait for settings to load before starting detection (max 2s)
       if (!this._settingsLoaded) {
@@ -1913,10 +1938,14 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       }, CONFIG.retryInterval);
 
       // Re-entry guard cleared after observer + interval are set up
-      this._detecting = false;
+      } finally {
+        this._detecting = false;
+      }
     },
 
     async handleCMP(cmpInfo) {
+      if (this._handling) return;
+      this._handling = true;
       if (this.processed) return;
 
       // Cooldown: if the last attempt failed verification, wait before
@@ -2008,6 +2037,8 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         }
       } catch (e) {
         DebugLog.error('Error handling CMP:', e.message);
+      } finally {
+        this._handling = false;
       }
     },
 
@@ -2074,7 +2105,11 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
 
     getDomain() {
       try {
-        return new URL(window.location.href).hostname;
+        const url = new URL(window.location.href);
+        if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+          return url.href;
+        }
+        return url.hostname;
       } catch {
         return window.location.hostname || 'unknown';
       }
@@ -2167,5 +2202,8 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     document.addEventListener('DOMContentLoaded', () => Engine.init());
   } else {
     Engine.init();
+  }
+  } catch (e) {
+    console.error('[CookieReject] Fatal error:', e);
   }
 })();

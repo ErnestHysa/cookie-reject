@@ -267,7 +267,10 @@
 
         await Storage.set(STORAGE_KEYS.LOG, log);
         return log;
-      }).catch(e => console.error('Storage operation failed:', e));
+      }).catch(e => {
+        console.error('LogManager.add failed:', e);
+        return null;
+      });
     },
 
     async get(limit = 50, offset = 0) {
@@ -357,7 +360,10 @@
 
         await this.setList(listName, list);
         return true;
-      }).catch(e => console.error('ListManager.addEntry failed:', e));
+      }).catch(e => {
+        console.error('ListManager.addEntry failed:', e);
+        return false;
+      });
     },
 
     async removeEntry(listName, domain) {
@@ -371,7 +377,10 @@
           return true;
         }
         return false;
-      }).catch(e => console.error('ListManager.removeEntry failed:', e));
+      }).catch(e => {
+        console.error('ListManager.removeEntry failed:', e);
+        return false;
+      });
     },
 
     async checkDomain(domain) {
@@ -405,37 +414,52 @@
     },
 
     async update(updates) {
-      const settings = await this.get();
-      const updated = { ...settings, ...updates };
-      await Storage.set(STORAGE_KEYS.SETTINGS, updated);
-      // Sync debug mode
-      if ('debugMode' in updates) debugMode = updates.debugMode;
-      return updated;
+      return _storageQueue = _storageQueue.then(async () => {
+        const settings = await this.get();
+        const updated = { ...settings, ...updates };
+        await Storage.set(STORAGE_KEYS.SETTINGS, updated);
+        // Sync debug mode
+        if ('debugMode' in updates) debugMode = updates.debugMode;
+        return updated;
+      }).catch(e => {
+        console.error('SettingsManager.update failed:', e);
+        return this.get();
+      });
     },
   };
 
   // ─── Unique Domain Tracker ─────────────────────────────────────────
   const UniqueDomainTracker = {
+    _cache: null,
+
+    async _ensureCache() {
+      if (!this._cache) {
+        const domains = await Storage.get(STORAGE_KEYS.UNIQUE_DOMAINS, []);
+        this._cache = new Set(domains);
+      }
+    },
+
     async isNew(domain) {
-      const domains = await Storage.get(STORAGE_KEYS.UNIQUE_DOMAINS, []);
-      return !domains.includes(domain);
+      await this._ensureCache();
+      return !this._cache.has(domain);
     },
 
     async add(domain) {
       return _storageQueue = _storageQueue.then(async () => {
-        const domains = await Storage.get(STORAGE_KEYS.UNIQUE_DOMAINS, []);
-        if (!domains.includes(domain)) {
-          domains.push(domain);
-          await Storage.set(STORAGE_KEYS.UNIQUE_DOMAINS, domains);
-          return true;
-        }
+        await this._ensureCache();
+        if (this._cache.has(domain)) return false;
+        this._cache.add(domain);
+        await Storage.set(STORAGE_KEYS.UNIQUE_DOMAINS, [...this._cache]);
+        return true;
+      }).catch(e => {
+        console.error('UniqueDomainTracker.add failed:', e);
         return false;
-      }).catch(e => console.error('Storage operation failed:', e));
+      });
     },
 
     async count() {
-      const domains = await Storage.get(STORAGE_KEYS.UNIQUE_DOMAINS, []);
-      return domains.length;
+      await this._ensureCache();
+      return this._cache.size;
     },
   };
 
@@ -571,22 +595,25 @@
           return { success: false, error: 'Invalid format: unexpected keys' };
         }
 
-        // Import each key with validation
-        let validCount = 0;
-        for (const [key, value] of Object.entries(parsed.data)) {
-          const { valid, sanitizedValue } = this.validateImportData(key, value);
-          if (valid) {
-            await Storage.set(key, sanitizedValue);
-            validCount++;
-          } else {
-            debugLog('Import skipped invalid key:', key);
+        // Serialize writes through storage queue to prevent data loss
+        return _storageQueue = _storageQueue.then(async () => {
+          let validCount = 0;
+          for (const [key, value] of Object.entries(parsed.data)) {
+            const { valid, sanitizedValue } = this.validateImportData(key, value);
+            if (valid) {
+              await Storage.set(key, sanitizedValue);
+              validCount++;
+            } else {
+              debugLog('Import skipped invalid key:', key);
+            }
           }
-        }
-
-        // Re-run migration to ensure schema consistency
-        await Migration.run();
-
-        return { success: true, keysImported: validCount };
+          // Run migration after import to ensure data integrity
+          await Migration.run();
+          return { success: true, keysImported: validCount };
+        }).catch(e => {
+          console.error('Import write failed:', e);
+          return { success: false, error: 'Import write failed: ' + e.message };
+        });
       } catch (e) {
         return { success: false, error: e.message };
       }

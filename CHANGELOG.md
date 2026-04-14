@@ -2,6 +2,29 @@
 
 All notable changes to CookieReject will be documented in this file.
 
+## [1.6.0] - 2026-04-14
+
+### Fixed (CRITICAL)
+- #1: `_handling` flag in handleCMP permanently stuck after early returns (processed check, cooldown guard). All guards now run BEFORE the flag is set, so try/finally always cleans up.
+
+### Fixed (MEDIUM)
+- #2: Cookiebot handler passed null root to findByText when dialog not rendered -- falls back to document
+- #3: SettingsManager.update read-modify-write now serialized via storage queue
+- #4: Import data writes now go through storage queue to prevent data loss on concurrent operations
+
+### Fixed (LOW)
+- #5: TCF API handler now calls __tcfapi('rejectAll') as programmatic supplement to button clicks
+- #6: ConsentManager vendor count uses actual checked toggle count instead of hardcoded +5
+- #7: Generic handler preferences flow no longer searches all div elements (removed div from selector)
+- #8: Storage queue catch handlers return consistent types (null/false instead of undefined)
+- #9: Test domainMatches now matches source (added toLowerCase, wildcard patterns, null guards, 6 new tests)
+- #10: UniqueDomainTracker uses Set for O(1) deduplication instead of O(n) Array.includes
+
+### Tests
+- 28 -> 34 tests (6 new: case insensitive, wildcard matching, null inputs for domainMatches)
+
+Bumped version: 1.5.0 -> 1.6.0
+
 ## [1.5.0] - 2026-04-14
 
 ### Fixed (CRITICAL)

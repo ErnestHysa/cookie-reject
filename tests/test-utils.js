@@ -45,7 +45,8 @@ function extractBaseDomain(url) {
     const parts = hostname.split('.');
     if (parts.length <= 2) return hostname;
     // Handle co.uk, com.au, etc.
-    const ccSlds = ['co.uk', 'com.au', 'co.nz', 'com.br', 'co.jp', 'com.sg', 'org.uk', 'net.au'];
+    const ccSlds = ['co.uk', 'com.au', 'co.jp', 'com.br', 'co.in', 'com.mx',
+      'org.uk', 'net.au', 'co.za', 'com.sg', 'co.nz', 'com.hk'];
     const lastTwo = parts.slice(-2).join('.');
     if (ccSlds.includes(lastTwo)) {
       return parts.slice(-3).join('.');
@@ -68,8 +69,19 @@ assertEqual('bare domain', extractBaseDomain('localhost'), 'localhost');
 console.log('\nListManager.domainMatches:');
 
 function domainMatches(domain, pattern) {
+  if (!domain || !pattern) return false;
+  domain = domain.toLowerCase();
+  pattern = pattern.toLowerCase();
+
   if (domain === pattern) return true;
-  return domain.endsWith('.' + pattern);
+  if (domain.endsWith('.' + pattern)) return true;
+
+  if (pattern.startsWith('*.')) {
+    const basePattern = pattern.slice(2);
+    return domain === basePattern || domain.endsWith('.' + basePattern);
+  }
+
+  return false;
 }
 
 assert('exact match', domainMatches('example.com', 'example.com'));
@@ -77,6 +89,12 @@ assert('subdomain match', domainMatches('www.example.com', 'example.com'));
 assert('deep subdomain match', domainMatches('a.b.example.com', 'example.com'));
 assert('no partial match', !domainMatches('notexample.com', 'example.com'));
 assert('no partial match reverse', !domainMatches('example.com', 'www.example.com'));
+assert('case insensitive domain', domainMatches('Example.COM', 'example.com'));
+assert('case insensitive pattern', domainMatches('example.com', 'EXAMPLE.COM'));
+assert('wildcard matches exact', domainMatches('example.com', '*.example.com'));
+assert('wildcard matches subdomain', domainMatches('www.example.com', '*.example.com'));
+assert('null domain returns false', !domainMatches(null, 'example.com'));
+assert('null pattern returns false', !domainMatches('example.com', null));
 
 // ─── HTML Escape ───
 console.log('\nHTML Escape:');

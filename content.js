@@ -698,7 +698,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     const declineBtn =
       document.getElementById('CybotCookiebotDialogBodyLevelButtonLevelOptinDeclineAll') ||
       document.querySelector('.CybotCookiebotDialogBodyLevelButtonLevelOptinDeclineAll') ||
-      Utils.findByText('decline', document.getElementById('CybotCookiebotDialog'), 'a, button');
+      Utils.findByText('decline', document.getElementById('CybotCookiebotDialog') || document, 'a, button');
     if (declineBtn) {
       declineBtn.click();
       rejected++;
@@ -1210,8 +1210,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         if (toggleAll) {
           const isChecked = toggleAll.getAttribute('aria-checked') === 'true';
           if (isChecked) {
+            const checkedToggles = box.querySelectorAll('a[role="checkbox"][data-cmp-vendor]:not([data-cmp-vendor="all"])[aria-checked="true"]');
+            vendorsUnticked += checkedToggles.length;
             toggleAll.click();
-            vendorsUnticked += 5; // approximate
             await Utils.sleep(100);
           }
         }
@@ -1562,7 +1563,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         // After opening preferences, try to find reject-all or untick toggles
         // First try reject-all again
         for (const rText of rejectTexts) {
-          const rBtn = Utils.findByText(rText, document, 'button, a, span, div');
+          const rBtn = Utils.findByText(rText, document, 'button, a, span');
           if (rBtn) {
             rBtn.click();
             rejected++;
@@ -1648,6 +1649,12 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
               } catch (e) { /* ignore */ }
               if (listenerSuccess && tcData.eventStatus === 'cmpuishown') {
                 success = true;
+                // Try programmatic rejection as supplement to button clicks
+                try {
+                  if (typeof window.__tcfapi === 'function') {
+                    window.__tcfapi('rejectAll', 2, () => {});
+                  }
+                } catch (e) { /* not supported by all CMPs */ }
               }
               finish();
             });
@@ -1945,7 +1952,6 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
 
     async handleCMP(cmpInfo) {
       if (this._handling) return;
-      this._handling = true;
       if (this.processed) return;
 
       // Cooldown: if the last attempt failed verification, wait before
@@ -1970,6 +1976,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       this.currentCMP = cmpInfo;
       DebugLog.log('Detected CMP:', cmpInfo.name, 'on', this.getDomain());
 
+      this._handling = true;
       try {
         // Small delay to let the banner fully render and its JS initialize.
         // Many CMPs inject their HTML server-side but attach click handlers

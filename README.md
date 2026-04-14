@@ -1,298 +1,125 @@
-<p align="center">
-  <img src="icons/icon-128.png" alt="CookieReject" width="80" height="80">
-  <h1 align="center">CookieReject</h1>
-  <p align="center">
-    <strong>Because "Reject All" should mean you click it once. Not 942 times.</strong>
-  </p>
-  <p align="center">
-    <img src="https://img.shields.io/badge/platform-Chrome%20%7C%20Firefox%20%7C%20Edge%20%7C%20Brave%20%7C%20Opera%20%7C%20Safari-blue" alt="Platforms">
-    <img src="https://img.shields.io/badge/CMP_frameworks-16%2B-green" alt="CMP Frameworks">
-    <img src="https://img.shields.io/badge/zero_dependencies-yes-brightgreen" alt="No Dependencies">
-    <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
-  </p>
-</p>
+# 🍪 CookieReject
+
+**Auto-reject cookies, vendor consents, and privacy popups.**
+
+Cookie consent banners are everywhere. Most of them have a tiny "Reject All" button buried in a submenu, or make you untick hundreds of vendor toggles one by one. CookieReject handles all of that automatically -- detecting the banner, navigating to preferences, unticking every vendor, and saving your choice. Across 16+ CMP frameworks and in 6 languages.
 
 ---
 
-## The Problem
-
-You know the drill. You visit a website. A cookie banner pops up. You look for "Reject All" -- but some sites don't have one. Instead you get:
-
-- "Manage Preferences" --> a wall of 200+ vendor toggles, all **ON** by default
-- You have to scroll through every single one, unticking each vendor
-- Some vendors are hidden behind "Show More" buttons or lazy-loaded as you scroll
-- After 2 minutes of unticking, you hit "Save Preferences" and hope it actually worked
-
-**Every. Single. Website.**
-
-That ends now.
-
-## The Solution
-
-**CookieReject** is a cross-browser extension that does all of this automatically:
-
-1. **Detects** the cookie consent banner (supports 15+ CMP frameworks)
-2. **Rejects all cookies** -- clicks "Reject All", "Decline", or "Deny" for you
-3. **Opens "Manage Preferences"** when no reject button exists
-4. **Scrolls through every vendor** and unticks all toggles
-5. **Saves your preferences** and closes the banner
-6. **Removes overlays** -- kills dark backdrops and scroll locks
-7. **Shows you exactly how much time you've saved** doing this manually
+[![CMP Frameworks](https://img.shields.io/badge/CMP_frameworks-16%2B-green)](#supported-cmp-frameworks)
+[![Browser Support](https://img.shields.io/badge/browsers-Chrome%20%7C%20Firefox%20%7C%20Edge%20%7C%20Safari-blue)](#install)
+[![License: MIT](https://img.shields.io/badge/license-MIT-brightgreen)](LICENSE)
 
 ## Install
 
-### Chrome
-
-```bash
-git clone https://github.com/ErnestHysa/cookie-reject.git
-```
-
-1. Go to `chrome://extensions`
-2. Turn on **Developer mode** (top right toggle)
-3. Click **"Load unpacked"**
-4. Select the `cookie-reject` folder
-5. Done
+### Chrome / Edge / Brave / Opera
+1. Download or clone this repo
+2. Go to `chrome://extensions` (or `edge://extensions`)
+3. Enable **Developer mode** (top right)
+4. Click **Load unpacked** → select the `cookie-reject` folder
+5. Done! The icon appears in your toolbar.
 
 ### Firefox
-
-```bash
-git clone https://github.com/ErnestHysa/cookie-reject.git
-```
-
 1. Go to `about:debugging#/runtime/this-firefox`
-2. Click **"Load Temporary Add-on"**
-3. Select `manifest.json` from the `cookie-reject` folder
-4. Note: temporary add-ons are removed when Firefox closes. For persistent install, sign the extension at [addons.mozilla.org](https://addons.mozilla.org/developers/).
+2. Click **Load Temporary Add-on**
+3. Select `manifest.json` from this folder
+4. Done! (Requires Firefox 126+ for Manifest V3 support)
 
-### Edge
+### Safari (macOS)
+Requires Xcode to build a Safari Web Extension wrapper. See [Apple's guide](https://developer.apple.com/documentation/safariservices/creating-a-safari-web-extension).
 
-```bash
-git clone https://github.com/ErnestHysa/cookie-reject.git
-```
+## Quick Start
 
-1. Go to `edge://extensions`
-2. Turn on **Developer mode** (left sidebar toggle)
-3. Click **"Load unpacked"**
-4. Select the `cookie-reject` folder
-5. Done
+1. Install the extension (see above)
+2. Browse the web normally
+3. Cookie banners are auto-rejected -- check the popup to see stats
+4. Press **Alt+Shift+R** to manually reject on the current page
 
-### Brave
+## How It Works
 
-```bash
-git clone https://github.com/ErnestHysa/cookie-reject.git
-```
+CookieReject runs a content script on every page you visit:
 
-1. Go to `brave://extensions`
-2. Turn on **Developer mode** (top right toggle)
-3. Click **"Load unpacked"**
-4. Select the `cookie-reject` folder
-5. Done
+1. **Detect** which CMP framework the site uses (OneTrust, Cookiebot, Didomi, etc.)
+2. **Reject** via the fastest path -- click "Reject All" if available, otherwise:
+   - Open cookie preferences/settings
+   - Untick all vendor toggles (scrolling lazy-loaded lists)
+   - Click save/confirm
+3. **Verify** the banner actually disappeared (not just clicked a dead button)
+4. **Clean up** -- dismiss overlays, restore page scroll
 
-### Opera
+Also uses IAB consent APIs (TCF v2, USP, GPP) to reject programmatically where available.
 
-```bash
-git clone https://github.com/ErnestHysa/cookie-reject.git
-```
+## Features
 
-1. Go to `opera://extensions`
-2. Turn on **Developer mode** (top right toggle)
-3. Click **"Load unpacked"**
-4. Select the `cookie-reject` folder
-5. Done
-
-### Safari (macOS, requires Xcode)
-
-Safari extensions need a macOS app wrapper.
-
-```bash
-# 1. Clone the repo
-git clone https://github.com/ErnestHysa/cookie-reject.git
-
-# 2. Convert to a Safari extension project
-xcrun safari-web-extension-converter cookie-reject
-
-# 3. Build and run
-# Xcode opens automatically. Press Cmd+R to build and run.
-# The app will offer to enable the Safari extension.
-# Go to Safari > Settings > Extensions and enable CookieReject.
-```
-
-## Updating
-
-When you `git pull` and reload the extension, **all your data is preserved**:
-- Stats (cookies rejected, vendors unticked, time saved)
-- Activity log
-- Whitelist and Blacklist entries
-- Settings and preferences
-
-The extension runs a migration on startup that merges any new default fields with your existing stored data. Nothing is overwritten or lost.
-
----
-
-## How It Looks
-
-The extension popup gives you a full dashboard:
-
-- **Time Saved** -- the hero stat. See exactly how many hours you've saved not clicking vendor toggles
-- **Stats Grid** -- cookies rejected, vendors unticked, sites protected
-- **Activity Log** -- every site where action was taken, what CMP was detected, what was rejected
-- **Whitelist / Blacklist** -- add sites to always-allow or always-reject (with subdomain support)
-- **Settings** -- toggle auto-reject, vendor unticking, overlay dismissal, TCF API usage
-
----
+- **16+ CMP frameworks** with dedicated handlers
+- **Generic fallback** for unknown cookie banners
+- **Vendor unticking** -- scrolls lazy-loaded vendor lists, clicks every toggle
+- **6 languages** -- English, German, French, Spanish, Italian, Dutch
+- **Cross-browser** -- Chrome, Firefox, Edge, Safari (Manifest V3)
+- **Privacy-first** -- all data stored locally, no external calls
+- **Import/Export** -- backup your settings, whitelist, and stats
+- **Debug mode** -- toggle console logging for troubleshooting
+- **Keyboard shortcut** -- Alt+Shift+R for manual rejection
+- **Smart verification** -- confirms banners actually disappeared after rejection
+- **Whitelist/Blacklist** -- per-site control
 
 ## Supported CMP Frameworks
 
-CookieReject recognizes and handles 15+ consent management platforms plus a generic fallback:
-
-| Framework | Detect | Reject All | Vendor Unticking |
-|-----------|:------:|:----------:|:----------------:|
-| OneTrust / Optanon | Yes | Yes | Yes |
-| Fides (ethyca) | Yes | Yes | Yes |
+| Framework | Auto-Detect | Auto-Reject | Vendor Unticking |
+|-----------|:-----------:|:-----------:|:----------------:|
+| OneTrust | Yes | Yes | Yes |
+| Fides (Ethyca) | Yes | Yes | Yes |
 | Ketch | Yes | Yes | Yes |
-| Cookiebot / Cybot | Yes | Yes | Yes |
+| Cookiebot | Yes | Yes | Yes |
 | Didomi | Yes | Yes | Yes |
-| Sourcepoint | Yes | Yes | Partial* |
+| Sourcepoint | Yes | Yes | Yes |
 | TrustArc | Yes | Yes | Yes |
-| Quantcast Choice | Yes | Yes | Yes |
+| Quantcast | Yes | Yes | Yes |
 | Usercentrics | Yes | Yes | Yes |
 | CookieYes | Yes | Yes | Yes |
-| Iubenda | Yes | Yes | No |
+| Iubenda | Yes | Yes | Yes |
 | ConsentManager | Yes | Yes | Yes |
-| Sirdata | Yes | Yes | No |
-| Ezoic (EzCookie) | Yes | Yes | No |
+| Sirdata | Yes | Yes | Yes |
+| Ezoic (EzCookie) | Yes | Yes | Yes |
 | Borlabs Cookie | Yes | Yes | Yes |
 | LGCookiesLaw (PrestaShop) | Yes | Yes | Yes |
 | **Generic fallback** | **Yes** | **Yes** | **Yes** |
 
-*Sourcepoint uses cross-origin iframes; vendor unticking works when same-origin.
+## Settings
 
-In addition to CMP-specific handlers, CookieReject also uses the **IAB Transparency & Consent Framework APIs** (`__tcfapi`, `__uspapi`, `__gpp`) to programmatically reject consent on any compliant site.
+All settings are functional and respected by the content script engine:
 
----
-
-## Features
-
-### Automatic Rejection
-- Runs silently on every page you visit
-- MutationObserver catches banners injected after page load
-- No configuration needed -- works out of the box
-
-### Vendor Unticking
-- Opens "Manage Preferences" when no direct reject button exists
-- Scrolls through the full vendor list (handles lazy-loaded items)
-- Unticks every vendor toggle except "Strictly Necessary" (disabled by the CMP)
-- Clicks "Save Preferences" / "Confirm My Choices" when done
-
-### Whitelist / Blacklist
-- **Whitelist**: Sites where you want to allow cookies (e.g. your banking site). Covers all subdomains.
-- **Blacklist**: Sites where you always want to force-reject. Also covers subdomains.
-- Adding to one list automatically removes from the other (transfer, not duplicate)
-- Add from the popup UI for the current site, or type a domain manually.
-
-### Stats & Activity
-- **Cookies Rejected** -- total number of consent actions taken
-- **Vendors Unticked** -- total vendor toggles turned off
-- **Sites Protected** -- number of unique sites where action was taken
-- **Time Saved** -- estimated time saved at ~47 seconds per site + ~2 seconds per vendor
-- **Activity Log** -- scrollable list of every site action with CMP detected, actions taken, and timestamp
-
-### Popup UI
-- Dark theme with green accents
-- Current site status: protected / whitelisted / no banner detected
-- One-click "Reject Now" button for manual triggering
-- Quick Whitelist / Blacklist buttons for the current site
-- Settings with toggle switches for all features
-
----
-
-## How It Works
-
-```
-Page loads
-    |
-    v
-Content script injected
-    |
-    v
-MutationObserver watches DOM for consent banners
-    |
-    v
-CMP Detection identifies the framework
-    |
-    +-- OneTrust? --> OneTrust handler
-    +-- Fides?     --> Fides handler
-    +-- Cookiebot? --> Cookiebot handler
-    +-- ...        --> (15+ more handlers)
-    +-- Unknown?   --> Generic fallback handler
-    |
-    v
-Handler executes rejection strategy:
-    |
-    +-- Try "Reject All" button directly
-    +-- If none: open "Manage Preferences"
-    |       +-- Untick all purpose toggles
-    |       +-- Scroll vendor list, untick all vendors
-    |       +-- Click "Save Preferences"
-    |
-    v
-TCF API rejection (IAB-compliant sites)
-    |
-    v
-Overlay removal (dark backdrops, scroll locks)
-    |
-    v
-Stats logged to background worker
-```
-
----
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Auto-Reject | On | Automatically detect and reject banners |
+| Untick All Vendors | On | Untick every vendor toggle in CMP panels |
+| Dismiss Overlays | On | Remove consent backdrops blocking page scroll |
+| TCF / GPP APIs | On | Use IAB consent APIs to reject programmatically |
+| Debug Mode | Off | Log detection details to browser console (F12) |
 
 ## Project Structure
 
 ```
 cookie-reject/
-├── manifest.json           Extension manifest (Manifest V3)
-├── browser-polyfill.js     Cross-browser API normalization (Chrome/Firefox/Safari)
-├── content.js              Content script -- consent rejection engine
-├── background.js           Background worker -- stats, logging, storage
+├── manifest.json          # Extension manifest (Manifest V3)
+├── background.js          # Service worker: stats, logging, lists, import/export
+├── content.js             # Content script: detection + rejection engine
+├── browser-polyfill.js    # Cross-browser API normalization
 ├── popup/
-│   ├── popup.html          Popup UI structure
-│   ├── popup.css           Dark theme styling
-│   └── popup.js            Popup interaction logic
-├── icons/
-│   ├── icon-16.png
-│   ├── icon-32.png
-│   ├── icon-48.png
-│   └── icon-128.png
-└── README.md
+│   ├── popup.html         # Popup UI
+│   ├── popup.css          # Dark theme styles
+│   └── popup.js           # Popup controller
+├── icons/                 # Extension icons (16/32/48/128 PNG)
+├── .gitignore
+├── LICENSE                # MIT
+├── CONTRIBUTING.md        # How to contribute
+└── README.md              # This file
 ```
-
-## Technical Details
-
-- **Manifest V3** -- works in Chrome, Edge, Brave, Opera, Firefox 126+, Safari 15.4+
-- **Cross-browser polyfill** -- normalizes `chrome.*` and `browser.*` APIs automatically
-- **Zero external dependencies** -- pure vanilla JavaScript, HTML, CSS
-- **~47 seconds estimated** per manual cookie rejection (industry research)
-- **~2 seconds estimated** per manual vendor toggle untick
-- Vendor processing safety limit of 2,000 toggles per page
-- Activity log capped at 500 entries
-- All data stored locally via extension storage API -- nothing leaves your machine
-
-## Browser Support
-
-| Browser | Minimum Version | Install Method | Notes |
-|---------|----------------|----------------|-------|
-| Chrome | 88+ | Load unpacked | Full support |
-| Edge | 88+ | Load unpacked | Full support |
-| Brave | Latest | Load unpacked | Full support |
-| Opera | 74+ | Load unpacked | Full support |
-| Firefox | 126+ | Load temporary add-on | Manifest V3 with service worker |
-| Safari | 15.4+ | Xcode app wrapper | Via `safari-web-extension-converter` |
 
 ## Contributing
 
-Found a CMP framework that isn't handled? A site where CookieReject doesn't work? Open an issue with the site URL and what you see. PRs welcome.
+Found a site where CookieReject doesn't work? Open an issue with the URL and browser version. See [CONTRIBUTING.md](CONTRIBUTING.md) for details on adding new CMP handlers.
 
 ## License
 
-MIT
+[MIT](LICENSE) — free to use, modify, and distribute.

@@ -22,8 +22,8 @@
 (function () {
   'use strict';
 
-  // ─── Version ──────────────────────────────────────────────────────────
-  const APP_VERSION = '1.0.0';
+  // ─── Version (single source of truth: read from manifest) ──────────
+  const APP_VERSION = chrome.runtime.getManifest().version;
 
   // ─── Constants ──────────────────────────────────────────────────────
   const STORAGE_KEYS = {
@@ -33,13 +33,14 @@
     BLACKLIST: 'cr_blacklist',
     SETTINGS: 'cr_settings',
     META: 'cr_meta',
+    UNIQUE_DOMAINS: 'cr_unique_domains',
   };
 
   const DEFAULT_STATS = {
     totalRejected: 0,
     totalVendorsUnticked: 0,
     totalSitesProtected: 0,
-    totalAllowed: 0,
+    totalUniqueSites: 0,
     installDate: null,
     lastResetDate: null,
   };
@@ -51,9 +52,22 @@
     untickVendors: true,
     dismissOverlays: true,
     useTCFApi: true,
+    debugMode: false,
   };
 
   const MAX_LOG_ENTRIES = 500;
+
+  // ─── Debug Logging ─────────────────────────────────────────────────
+  let debugMode = false;
+
+  function debugLog(...args) {
+    if (debugMode) console.log('[CookieReject]', ...args);
+  }
+
+  async function loadDebugMode() {
+    const settings = await Storage.get(STORAGE_KEYS.SETTINGS, DEFAULT_SETTINGS);
+    debugMode = settings.debugMode || false;
+  }
 
   // ─── Storage Helpers ────────────────────────────────────────────────
   const Storage = {
@@ -78,24 +92,37 @@
         }
       });
     },
+
+    async remove(keys) {
+      return new Promise((resolve) => {
+        try {
+          chrome.storage.local.remove(keys, resolve);
+        } catch {
+          resolve();
+        }
+      });
+    },
+
+    async getAll() {
+      return new Promise((resolve) => {
+        try {
+          chrome.storage.local.get(null, resolve);
+        } catch {
+          resolve({});
+        }
+      });
+    },
   };
 
   // ─── Data Migration ─────────────────────────────────────────────────
-  // Ensures stored objects have all expected fields, even after an update
-  // that added new default fields. Preserves all existing user data.
   const Migration = {
-    /**
-     * Merge a stored object with its current defaults.
-     * Adds any missing fields from defaults without overwriting existing values.
-     */
     mergeWithDefaults(stored, defaults) {
-      if (!stored || typeof stored !== 'object') return { ...defaults };
+      if (!stored || typeof stored !== 'object') return { data: { ...defaults }, needsUpdate: true };
       let needsUpdate = false;
       const merged = { ...defaults };
       for (const key of Object.keys(stored)) {
         merged[key] = stored[key];
       }
-      // Check if any new default fields were added
       for (const key of Object.keys(defaults)) {
         if (!(key in stored)) {
           needsUpdate = true;
@@ -104,10 +131,6 @@
       return { data: merged, needsUpdate };
     },
 
-    /**
-     * Run all migrations on startup. Safe to call on every extension load.
-     * Only writes to storage if fields were actually missing.
-     */
     async run() {
       let migrated = false;
 
@@ -131,10 +154,9 @@
         }
       }
 
-      // 3. Ensure meta record exists (tracks last seen version)
+      // 3. Ensure meta record exists
       const meta = await Storage.get(STORAGE_KEYS.META, null);
       if (!meta) {
-        // First install or pre-meta version -- record current version but don't touch data
         await Storage.set(STORAGE_KEYS.META, {
           version: APP_VERSION,
           firstInstallDate: (await Storage.get(STORAGE_KEYS.STATS, {})).installDate || Date.now(),
@@ -142,7 +164,6 @@
         });
         migrated = true;
       } else if (meta.version !== APP_VERSION) {
-        // Version changed -- update meta record
         await Storage.set(STORAGE_KEYS.META, {
           ...meta,
           version: APP_VERSION,
@@ -160,7 +181,6 @@
   // ─── Stats Management ───────────────────────────────────────────────
   const StatsManager = {
     async get() {
-      // Always merge with defaults to pick up any new fields from updates
       const stored = await Storage.get(STORAGE_KEYS.STATS, DEFAULT_STATS);
       const { data } = Migration.mergeWithDefaults(stored, DEFAULT_STATS);
       if (!data.installDate) {
@@ -193,17 +213,14 @@
         lastResetDate: Date.now(),
       };
       await Storage.set(STORAGE_KEYS.STATS, resetStats);
+      // Also clear unique domains set
+      await Storage.set(STORAGE_KEYS.UNIQUE_DOMAINS, []);
       return resetStats;
     },
 
-    /**
-     * Calculate estimated time saved.
-     * Average manual cookie rejection takes ~47 seconds per site.
-     * Vendor unticking adds ~2 seconds per vendor.
-     */
     calculateTimeSaved(stats) {
-      const siteTime = (stats.totalSitesProtected || 0) * 47; // seconds
-      const vendorTime = (stats.totalVendorsUnticked || 0) * 2; // seconds
+      const siteTime = (stats.totalSitesProtected || 0) * 47;
+      const vendorTime = (stats.totalVendorsUnticked || 0) * 2;
       return siteTime + vendorTime;
     },
 
@@ -228,7 +245,6 @@
         ...entry,
       });
 
-      // Keep only the last MAX_LOG_ENTRIES
       if (log.length > MAX_LOG_ENTRIES) {
         log.length = MAX_LOG_ENTRIES;
       }
@@ -240,6 +256,11 @@
     async get(limit = 50, offset = 0) {
       const log = await Storage.get(STORAGE_KEYS.LOG, []);
       return log.slice(offset, offset + limit);
+    },
+
+    async getForDomain(domain, limit = 10) {
+      const log = await Storage.get(STORAGE_KEYS.LOG, []);
+      return log.filter(e => e.domain === domain).slice(0, limit);
     },
 
     async clear() {
@@ -254,17 +275,11 @@
 
   // ─── Whitelist / Blacklist ──────────────────────────────────────────
   const ListManager = {
-    /**
-     * Extract the base domain from a hostname.
-     * e.g. "sub.example.co.uk" -> "example.co.uk"
-     *      "www.forbes.com" -> "forbes.com"
-     */
     extractBaseDomain(hostname) {
       if (!hostname) return '';
       const parts = hostname.split('.');
       if (parts.length <= 2) return hostname;
 
-      // Common multi-part TLDs
       const multiTLDs = ['co.uk', 'com.au', 'co.jp', 'com.br', 'co.in', 'com.mx',
         'org.uk', 'net.au', 'co.za', 'com.sg', 'co.nz', 'com.hk'];
       const lastTwo = parts.slice(-2).join('.');
@@ -275,21 +290,14 @@
       return parts.slice(-2).join('.');
     },
 
-    /**
-     * Check if a domain matches a pattern (supports subdomain matching).
-     */
     domainMatches(domain, pattern) {
       if (!domain || !pattern) return false;
       domain = domain.toLowerCase();
       pattern = pattern.toLowerCase();
 
-      // Exact match
       if (domain === pattern) return true;
-
-      // Subdomain match: pattern "example.com" matches "sub.example.com"
       if (domain.endsWith('.' + pattern)) return true;
 
-      // Wildcard pattern
       if (pattern.startsWith('*.')) {
         const basePattern = pattern.slice(2);
         return domain === basePattern || domain.endsWith('.' + basePattern);
@@ -314,7 +322,6 @@
 
       const list = await this.getList(listName);
 
-      // Check for duplicates
       const exists = list.some(entry =>
         this.domainMatches(baseDomain, entry.domain)
       );
@@ -360,9 +367,10 @@
   // ─── Settings ───────────────────────────────────────────────────────
   const SettingsManager = {
     async get() {
-      // Always merge with defaults to pick up any new fields from updates
       const stored = await Storage.get(STORAGE_KEYS.SETTINGS, DEFAULT_SETTINGS);
       const { data } = Migration.mergeWithDefaults(stored, DEFAULT_SETTINGS);
+      // Sync debug mode
+      debugMode = data.debugMode || false;
       return data;
     },
 
@@ -370,7 +378,80 @@
       const settings = await this.get();
       const updated = { ...settings, ...updates };
       await Storage.set(STORAGE_KEYS.SETTINGS, updated);
+      // Sync debug mode
+      if ('debugMode' in updates) debugMode = updates.debugMode;
       return updated;
+    },
+  };
+
+  // ─── Unique Domain Tracker ─────────────────────────────────────────
+  const UniqueDomainTracker = {
+    async isNew(domain) {
+      const domains = await Storage.get(STORAGE_KEYS.UNIQUE_DOMAINS, []);
+      return !domains.includes(domain);
+    },
+
+    async add(domain) {
+      const domains = await Storage.get(STORAGE_KEYS.UNIQUE_DOMAINS, []);
+      if (!domains.includes(domain)) {
+        domains.push(domain);
+        await Storage.set(STORAGE_KEYS.UNIQUE_DOMAINS, domains);
+        return true;
+      }
+      return false;
+    },
+
+    async count() {
+      const domains = await Storage.get(STORAGE_KEYS.UNIQUE_DOMAINS, []);
+      return domains.length;
+    },
+  };
+
+  // ─── Import / Export ────────────────────────────────────────────────
+  const ImportExport = {
+    async exportData() {
+      const all = await Storage.getAll();
+      // Only export our prefixed keys
+      const data = {};
+      for (const [key, value] of Object.entries(all)) {
+        if (key.startsWith('cr_')) {
+          data[key] = value;
+        }
+      }
+      return {
+        version: APP_VERSION,
+        exportedAt: Date.now(),
+        data: data,
+      };
+    },
+
+    async importData(jsonString) {
+      try {
+        const parsed = JSON.parse(jsonString);
+        if (!parsed.data || typeof parsed.data !== 'object') {
+          return { success: false, error: 'Invalid format: missing data object' };
+        }
+
+        // Validate it looks like our data
+        const keys = Object.keys(parsed.data);
+        const validPrefixes = ['cr_'];
+        const allValid = keys.every(k => validPrefixes.some(p => k.startsWith(p)));
+        if (!allValid) {
+          return { success: false, error: 'Invalid format: unexpected keys' };
+        }
+
+        // Import each key
+        for (const [key, value] of Object.entries(parsed.data)) {
+          await Storage.set(key, value);
+        }
+
+        // Re-run migration to ensure schema consistency
+        await Migration.run();
+
+        return { success: true, keysImported: keys.length };
+      } catch (e) {
+        return { success: false, error: e.message };
+      }
     },
   };
 
@@ -384,26 +465,40 @@
           return { enabled: settings.enabled };
         }
 
+        // ── Full Settings (for content script) ──
+        case 'GET_FULL_SETTINGS': {
+          const settings = await SettingsManager.get();
+          return settings;
+        }
+
         // ── Logging ──
         case 'LOG_ACTION': {
           const { data } = message;
+          const baseDomain = ListManager.extractBaseDomain(data.domain);
+
+          // Track unique domains
+          const isNewDomain = await UniqueDomainTracker.add(baseDomain);
 
           // Update stats
           const stats = await StatsManager.increment({
             totalRejected: data.rejected || 0,
             totalVendorsUnticked: data.vendorsUnticked || 0,
             totalSitesProtected: 1,
+            totalUniqueSites: isNewDomain ? 1 : 0,
           });
 
-          // Add to activity log
+          // Add to activity log (strip query params from URL)
+          const safeUrl = data.url ? data.url.split('?')[0].split('#')[0] : data.domain;
           await LogManager.add({
             domain: data.domain,
             cmp: data.cmp,
             rejected: data.rejected,
             vendorsUnticked: data.vendorsUnticked,
             timestamp: data.timestamp,
-            url: data.url,
+            url: safeUrl,
           });
+
+          debugLog('Action logged:', data.domain, data.cmp, 'new domain:', isNewDomain);
 
           return { success: true, stats };
         }
@@ -427,6 +522,10 @@
           return log;
         }
 
+        case 'GET_LOG_FOR_DOMAIN': {
+          return await LogManager.getForDomain(message.domain, message.limit || 10);
+        }
+
         case 'CLEAR_LOG': {
           await LogManager.clear();
           return { success: true };
@@ -438,7 +537,6 @@
         }
 
         case 'ADD_TO_LIST': {
-          // Remove from the opposite list first (transfer, not duplicate)
           const oppositeList = message.list === 'whitelist' ? 'blacklist' : 'whitelist';
           await ListManager.removeEntry(oppositeList, message.domain);
           const added = await ListManager.addEntry(message.list, message.domain);
@@ -469,6 +567,15 @@
         case 'UPDATE_SETTINGS': {
           const updated = await SettingsManager.update(message.settings);
           return updated;
+        }
+
+        // ── Import / Export ──
+        case 'EXPORT_DATA': {
+          return await ImportExport.exportData();
+        }
+
+        case 'IMPORT_DATA': {
+          return await ImportExport.importData(message.json);
         }
 
         // ── Popup: Get current tab info ──
@@ -508,13 +615,33 @@
           });
         }
 
+        // ── Version info ──
+        case 'GET_VERSION': {
+          return { version: APP_VERSION };
+        }
+
         default:
           return { error: 'Unknown message type' };
       }
     };
 
     handle().then(sendResponse);
-    return true; // keep channel open for async response
+    return true;
+  });
+
+  // ─── Keyboard Shortcut Handler ─────────────────────────────────────
+  chrome.commands.onCommand.addListener(async (command) => {
+    if (command === 'reject-now') {
+      debugLog('Keyboard shortcut triggered: reject-now');
+      const tabs = await new Promise(resolve => {
+        chrome.tabs.query({ active: true, currentWindow: true }, resolve);
+      });
+      if (tabs[0] && tabs[0].id) {
+        chrome.tabs.sendMessage(tabs[0].id, { type: 'FORCE_REJECT' }, () => {
+          if (chrome.runtime.lastError) { /* ignore */ }
+        });
+      }
+    }
   });
 
   // ─── Badge Management ───────────────────────────────────────────────
@@ -543,4 +670,5 @@
   // ─── Initialize ─────────────────────────────────────────────────────
   Migration.run();
   Badge.update();
+  loadDebugMode();
 })();

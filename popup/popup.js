@@ -1,337 +1,449 @@
 /**
- * CookieReject - Popup Script
- * Handles UI interactions, stats display, and list management.
+ * CookieReject - Popup UI Controller
+ * Handles all interactions in the browser extension popup.
  */
+
+// ─── Cross-Browser Polyfill Guard ─────────────────────────────────
+if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
+  var chrome = browser;
+}
 
 (function () {
   'use strict';
 
-  // ─── Helpers ────────────────────────────────────────────────────────
-  const $ = (sel) => document.querySelector(sel);
-  const $$ = (sel) => document.querySelectorAll(sel);
+  // ─── Helpers ──────────────────────────────────────────────────────
+
+  function $(id) { return document.getElementById(id); }
 
   function sendMessage(msg) {
     return new Promise((resolve) => {
       try {
         chrome.runtime.sendMessage(msg, (response) => {
-          if (chrome.runtime.lastError) {
-            console.debug('[CookieReject Popup]', chrome.runtime.lastError.message);
-            resolve(null);
-          } else {
-            resolve(response);
-          }
+          if (chrome.runtime.lastError) resolve(null);
+          else resolve(response);
         });
-      } catch {
-        resolve(null);
-      }
+      } catch { resolve(null); }
     });
   }
 
-  function timeAgo(timestamp) {
-    const seconds = Math.floor((Date.now() - timestamp) / 1000);
-    if (seconds < 60) return 'just now';
-    const minutes = Math.floor(seconds / 60);
-    if (minutes < 60) return `${minutes}m ago`;
-    const hours = Math.floor(minutes / 60);
-    if (hours < 24) return `${hours}h ago`;
-    const days = Math.floor(hours / 24);
-    return `${days}d ago`;
+  function sendTabMessage(msg) {
+    return new Promise((resolve) => {
+      try {
+        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+          if (tabs[0] && tabs[0].id) {
+            chrome.tabs.sendMessage(tabs[0].id, msg, (response) => {
+              if (chrome.runtime.lastError) resolve(null);
+              else resolve(response);
+            });
+          } else {
+            resolve(null);
+          }
+        });
+      } catch { resolve(null); }
+    });
   }
 
-  // ─── Tab Navigation ─────────────────────────────────────────────────
+  function formatTimestamp(ts) {
+    if (!ts) return '';
+    const d = new Date(ts);
+    const now = new Date();
+    const diffMs = now - d;
+    const diffMin = Math.floor(diffMs / 60000);
+
+    if (diffMin < 1) return 'Just now';
+    if (diffMin < 60) return `${diffMin}m ago`;
+    if (diffMin < 1440) return `${Math.floor(diffMin / 60)}h ago`;
+    return d.toLocaleDateString();
+  }
+
+  function showToast(message, isError = false) {
+    // Remove existing toasts
+    document.querySelectorAll('.toast').forEach(t => t.remove());
+
+    const toast = document.createElement('div');
+    toast.className = 'toast' + (isError ? ' error' : '');
+    toast.textContent = message;
+    document.body.appendChild(toast);
+
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => toast.classList.add('show'));
+    });
+
+    setTimeout(() => {
+      toast.classList.remove('show');
+      setTimeout(() => toast.remove(), 300);
+    }, 2000);
+  }
+
+  // ─── Tab Management ────────────────────────────────────────────────
+
   function initTabs() {
-    const tabs = $$('.nav-tab');
-    tabs.forEach((tab) => {
+    document.querySelectorAll('.tab').forEach((tab) => {
       tab.addEventListener('click', () => {
-        tabs.forEach((t) => t.classList.remove('active'));
-        $$('.tab-content').forEach((c) => c.classList.remove('active'));
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
         tab.classList.add('active');
-        const target = $(`#tab-${tab.dataset.tab}`);
-        if (target) target.classList.add('active');
+        $('tab-' + tab.dataset.tab).classList.add('active');
       });
     });
   }
 
-  // ─── Load Stats ─────────────────────────────────────────────────────
-  async function loadStats() {
-    const stats = await sendMessage({ type: 'GET_STATS' });
-    if (!stats) return;
+  // ─── Version ───────────────────────────────────────────────────────
 
-    $('#stat-rejected').textContent = formatNumber(stats.totalRejected || 0);
-    $('#stat-vendors').textContent = formatNumber(stats.totalVendorsUnticked || 0);
-    $('#stat-sites').textContent = formatNumber(stats.totalSitesProtected || 0);
-    $('#stat-allowed').textContent = formatNumber(stats.totalAllowed || 0);
-
-    // Time saved
-    const timeSaved = stats.timeSaved || 0;
-    const timeFormatted = stats.timeSavedFormatted || '0s';
-    $('#time-saved').textContent = timeFormatted;
-
-    // Sub text showing days since install
-    if (stats.installDate) {
-      const daysSince = Math.max(1, Math.floor((Date.now() - stats.installDate) / 86400000));
-      $('#time-saved-sub').textContent = `in ${daysSince} day${daysSince !== 1 ? 's' : ''} of browsing`;
-    }
+  async function loadVersion() {
+    const manifest = chrome.runtime.getManifest();
+    $('version').textContent = 'v' + manifest.version;
+    $('footerVersion').textContent = 'v' + manifest.version;
   }
 
-  function formatNumber(n) {
-    if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
-    if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
-    return String(n);
+  // ─── Master Toggle ─────────────────────────────────────────────────
+
+  function initMasterToggle() {
+    $('masterToggle').addEventListener('change', async (e) => {
+      await sendMessage({ type: 'UPDATE_SETTINGS', settings: { enabled: e.target.checked } });
+      showToast(e.target.checked ? 'Extension enabled' : 'Extension disabled');
+    });
   }
 
-  // ─── Load Current Site Info ─────────────────────────────────────────
+  // ─── Current Site ──────────────────────────────────────────────────
+
   async function loadCurrentSite() {
     const tabInfo = await sendMessage({ type: 'GET_CURRENT_TAB_INFO' });
     if (!tabInfo || !tabInfo.domain) {
-      $('#current-domain').textContent = 'Not available';
-      $('#site-status').innerHTML = `
-        <span class="status-dot inactive"></span>
-        <span class="status-text">Not a web page</span>
-      `;
+      $('siteDomain').textContent = 'Not a web page';
+      updateStatus('inactive', 'N/A');
       return;
     }
 
-    $('#current-domain').textContent = tabInfo.domain;
+    $('siteDomain').textContent = tabInfo.domain;
 
     // Check list status
     const listCheck = await sendMessage({ type: 'CHECK_LIST', domain: tabInfo.domain });
-    // Check content script status
-    const contentStatus = await sendMessage({ type: 'GET_CONTENT_STATUS' });
-
     if (listCheck && listCheck.whitelisted) {
-      $('#site-status').innerHTML = `
-        <span class="status-dot whitelisted"></span>
-        <span class="status-text">Whitelisted - cookies allowed</span>
-      `;
-    } else if (listCheck && listCheck.blacklisted) {
-      $('#site-status').innerHTML = `
-        <span class="status-dot protected"></span>
-        <span class="status-text">Blacklisted - always rejecting</span>
-      `;
-    } else if (contentStatus && contentStatus.processed) {
-      $('#site-status').innerHTML = `
-        <span class="status-dot protected"></span>
-        <span class="status-text">Protected${contentStatus.cmp ? ' (' + contentStatus.cmp.name + ')' : ''}</span>
-      `;
-    } else if (contentStatus && contentStatus.active && !contentStatus.processed) {
-      // Content script is running but hasn't processed anything.
-      // This usually means no banner was detected -- don't show "Processing"
-      // unless the page just loaded (under 5 seconds).
-      const isRecent = contentStatus.timestamp && (Date.now() - contentStatus.timestamp < 5000);
-      if (isRecent) {
-        $('#site-status').innerHTML = `
-          <span class="status-dot processing"></span>
-          <span class="status-text">Processing...</span>
-        `;
+      updateStatus('warning', 'Whitelisted');
+      $('whitelistBtn').textContent = 'Remove from Whitelist';
+      $('whitelistBtn').dataset.action = 'remove-whitelist';
+      return;
+    }
+
+    // Check content script status
+    const status = await sendTabMessage({ type: 'GET_STATUS_CONTENT' });
+    if (!status || !status.active) {
+      if (status && status.error) {
+        updateStatus('inactive', 'No content script');
+      }
+      return;
+    }
+
+    if (status.processed) {
+      if (status.cmp) {
+        updateStatus('active', `Rejected (${status.cmp.name})`);
       } else {
-        $('#site-status').innerHTML = `
-          <span class="status-dot inactive"></span>
-          <span class="status-text">No banner detected</span>
-        `;
+        updateStatus('active', 'No banner found');
       }
     } else {
-      $('#site-status').innerHTML = `
-        <span class="status-dot inactive"></span>
-        <span class="status-text">No banner detected</span>
-      `;
+      const elapsed = Date.now() - (status.timestamp || Date.now());
+      if (elapsed < 15000) {
+        updateStatus('warning', 'Scanning...');
+      } else {
+        updateStatus('inactive', 'No banner detected');
+      }
     }
-
-    // Store domain for button actions
-    $('#btn-whitelist').dataset.domain = tabInfo.domain;
-    $('#btn-blacklist').dataset.domain = tabInfo.domain;
   }
 
-  // ─── Load Activity Log ──────────────────────────────────────────────
+  function updateStatus(state, text) {
+    const dot = document.querySelector('.status-dot');
+    const textEl = document.querySelector('.status-text');
+    dot.className = 'status-dot';
+    if (state === 'active') dot.classList.add('active');
+    else if (state === 'warning') dot.classList.add('warning');
+    else if (state === 'error') dot.classList.add('error');
+    textEl.textContent = text;
+  }
+
+  // ─── Stats ─────────────────────────────────────────────────────────
+
+  async function loadStats() {
+    const stats = await sendMessage({ type: 'GET_STATS' });
+    if (!stats) return;
+    $('statRejected').textContent = stats.totalRejected || 0;
+    $('statUnique').textContent = stats.totalUniqueSites || 0;
+    $('statVendors').textContent = stats.totalVendorsUnticked || 0;
+    $('statTime').textContent = stats.timeSavedFormatted || '0s';
+  }
+
+  // ─── Activity ──────────────────────────────────────────────────────
+
   async function loadActivity() {
-    const log = await sendMessage({ type: 'GET_LOG', limit: 20 });
-    const container = $('#activity-list');
+    const log = await sendMessage({ type: 'GET_LOG', limit: 30 });
+    const container = $('activityList');
 
     if (!log || log.length === 0) {
-      container.innerHTML = `
-        <div class="empty-state">
-          <span class="empty-icon">
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-              <path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
-            </svg>
-          </span>
-          <p>No activity yet. Browse the web and CookieReject will protect you!</p>
-        </div>
-      `;
+      container.innerHTML = '<div class="empty-state">No activity yet</div>';
       return;
     }
 
-    container.innerHTML = log.map((entry) => `
+    container.innerHTML = log.map(entry => `
       <div class="activity-item">
-        <div class="activity-icon rejected">🛡️</div>
-        <div class="activity-details">
-          <div class="activity-domain" title="${entry.url || entry.domain}">${entry.domain}</div>
-          <div class="activity-meta">
-            <span>${timeAgo(entry.timestamp)}</span>
-            ${entry.cmp ? `<span class="activity-cmp">${entry.cmp}</span>` : ''}
-            ${entry.rejected ? `<span>🚫 ${entry.rejected} rejected</span>` : ''}
-            ${entry.vendorsUnticked ? `<span>⚙️ ${entry.vendorsUnticked} vendors</span>` : ''}
-          </div>
+        <div>
+          <div class="activity-domain" title="${entry.domain}">${entry.domain}</div>
+          <span class="activity-cmp">${entry.cmp || 'Unknown'}</span>
         </div>
+        <span class="activity-time">${formatTimestamp(entry.timestamp)}</span>
       </div>
     `).join('');
   }
 
-  // ─── Load Lists ─────────────────────────────────────────────────────
-  async function loadLists() {
-    const lists = await sendMessage({ type: 'GET_ALL_LISTS' });
-    if (!lists) return;
+  // ─── Lists ─────────────────────────────────────────────────────────
 
-    renderList('whitelist', lists.whitelist || []);
-    renderList('blacklist', lists.blacklist || []);
+  async function loadLists() {
+    const [whitelist, blacklist] = await Promise.all([
+      sendMessage({ type: 'GET_LIST', list: 'whitelist' }),
+      sendMessage({ type: 'GET_LIST', list: 'blacklist' }),
+    ]);
+
+    renderList('whitelist', whitelist || [], 'whitelistItems', 'whitelistCount');
+    renderList('blacklist', blacklist || [], 'blacklistItems', 'blacklistCount');
   }
 
-  function renderList(listName, entries) {
-    const container = $(`#${listName}-items`);
-    const countEl = $(`#${listName}-count`);
+  function renderList(type, items, containerId, countId) {
+    const container = $(containerId);
+    const countEl = $(countId);
+    countEl.textContent = items.length;
 
-    countEl.textContent = entries.length;
-
-    if (entries.length === 0) {
-      container.innerHTML = `<p class="list-empty">No ${listName === 'whitelist' ? 'whitelisted' : 'blacklisted'} sites</p>`;
+    if (items.length === 0) {
+      container.innerHTML = '<div class="empty-state">No entries</div>';
       return;
     }
 
-    container.innerHTML = entries.map((entry) => `
-      <div class="list-entry">
-        <span class="list-entry-domain">${entry.domain}</span>
-        <button class="list-entry-remove" data-list="${listName}" data-domain="${entry.domain}" title="Remove">&times;</button>
+    container.innerHTML = items.map(item => `
+      <div class="list-item">
+        <span class="list-item-domain">${item.domain}</span>
+        <button class="list-item-remove" data-list="${type}" data-domain="${item.domain}" title="Remove">&times;</button>
       </div>
     `).join('');
+  }
 
-    // Attach remove handlers
-    container.querySelectorAll('.list-entry-remove').forEach((btn) => {
-      btn.addEventListener('click', async () => {
-        await sendMessage({
-          type: 'REMOVE_FROM_LIST',
-          list: btn.dataset.list,
-          domain: btn.dataset.domain,
-        });
+  function initListHandlers() {
+    // Add to whitelist
+    $('addWhitelistBtn').addEventListener('click', async () => {
+      const domain = $('whitelistInput').value.trim();
+      if (!domain) return;
+      await sendMessage({ type: 'ADD_TO_LIST', list: 'whitelist', domain });
+      $('whitelistInput').value = '';
+      loadLists();
+      loadCurrentSite();
+      showToast('Added to whitelist');
+    });
+
+    // Add to blacklist
+    $('addBlacklistBtn').addEventListener('click', async () => {
+      const domain = $('blacklistInput').value.trim();
+      if (!domain) return;
+      await sendMessage({ type: 'ADD_TO_LIST', list: 'blacklist', domain });
+      $('blacklistInput').value = '';
+      loadLists();
+      showToast('Added to blacklist');
+    });
+
+    // Remove from list (delegated)
+    document.addEventListener('click', async (e) => {
+      if (e.target.classList.contains('list-item-remove')) {
+        const { list, domain } = e.target.dataset;
+        await sendMessage({ type: 'REMOVE_FROM_LIST', list, domain });
         loadLists();
-        loadStats();
-      });
+        loadCurrentSite();
+        showToast('Removed from ' + list);
+      }
     });
   }
 
-  // ─── Load Settings ──────────────────────────────────────────────────
+  // ─── Whitelist / Blacklist Current Site ─────────────────────────────
+
+  function initSiteActions() {
+    // Reject Now button
+    $('rejectNowBtn').addEventListener('click', async () => {
+      $('rejectNowBtn').disabled = true;
+      $('rejectNowBtn').textContent = 'Rejecting...';
+      await sendTabMessage({ type: 'FORCE_REJECT' });
+      // Wait a moment then refresh
+      setTimeout(async () => {
+        $('rejectNowBtn').disabled = false;
+        $('rejectNowBtn').textContent = 'Reject Now';
+        await loadCurrentSite();
+        await loadStats();
+        await loadActivity();
+      }, 1500);
+    });
+
+    // Whitelist button
+    $('whitelistBtn').addEventListener('click', async () => {
+      const action = $('whitelistBtn').dataset.action;
+      const tabInfo = await sendMessage({ type: 'GET_CURRENT_TAB_INFO' });
+      if (!tabInfo) return;
+
+      if (action === 'remove-whitelist') {
+        await sendMessage({ type: 'REMOVE_FROM_LIST', list: 'whitelist', domain: tabInfo.domain });
+        $('whitelistBtn').textContent = 'Whitelist';
+        delete $('whitelistBtn').dataset.action;
+        showToast('Removed from whitelist');
+      } else {
+        await sendMessage({ type: 'ADD_TO_LIST', list: 'whitelist', domain: tabInfo.domain });
+        $('whitelistBtn').textContent = 'Remove from Whitelist';
+        $('whitelistBtn').dataset.action = 'remove-whitelist';
+        showToast('Added to whitelist');
+      }
+      loadCurrentSite();
+    });
+  }
+
+  // ─── Settings ──────────────────────────────────────────────────────
+
   async function loadSettings() {
     const settings = await sendMessage({ type: 'GET_SETTINGS' });
     if (!settings) return;
 
-    $('#toggle-enabled').checked = settings.enabled;
-    $('#setting-auto-reject').checked = settings.autoReject;
-    $('#setting-untick-vendors').checked = settings.untickVendors;
-    $('#setting-dismiss-overlays').checked = settings.dismissOverlays;
-    $('#setting-tcf-api').checked = settings.useTCFApi;
+    $('masterToggle').checked = settings.enabled;
+    $('settingAutoReject').checked = settings.autoReject;
+    $('settingUntickVendors').checked = settings.untickVendors;
+    $('settingDismissOverlays').checked = settings.dismissOverlays;
+    $('settingTCFApi').checked = settings.useTCFApi;
+    $('settingDebug').checked = settings.debugMode;
   }
 
-  // ─── Event Handlers ─────────────────────────────────────────────────
-  function initEventHandlers() {
-    // Main toggle
-    $('#toggle-enabled').addEventListener('change', async (e) => {
-      await sendMessage({
-        type: 'UPDATE_SETTINGS',
-        settings: { enabled: e.target.checked },
-      });
-    });
+  function initSettingsHandlers() {
+    const toggles = [
+      { id: 'settingAutoReject', key: 'autoReject' },
+      { id: 'settingUntickVendors', key: 'untickVendors' },
+      { id: 'settingDismissOverlays', key: 'dismissOverlays' },
+      { id: 'settingTCFApi', key: 'useTCFApi' },
+      { id: 'settingDebug', key: 'debugMode' },
+    ];
 
-    // Whitelist current site
-    $('#btn-whitelist').addEventListener('click', async () => {
-      const domain = $('#btn-whitelist').dataset.domain;
-      if (!domain) return;
-      await sendMessage({ type: 'ADD_TO_LIST', list: 'whitelist', domain });
-      loadCurrentSite();
-      loadLists();
-    });
-
-    // Blacklist current site
-    $('#btn-blacklist').addEventListener('click', async () => {
-      const domain = $('#btn-blacklist').dataset.domain;
-      if (!domain) return;
-      await sendMessage({ type: 'ADD_TO_LIST', list: 'blacklist', domain });
-      loadCurrentSite();
-      loadLists();
-    });
-
-    // Force reject
-    $('#btn-force-reject').addEventListener('click', async () => {
-      const tabInfo = await sendMessage({ type: 'GET_CURRENT_TAB_INFO' });
-      if (tabInfo && tabInfo.tabId) {
-        chrome.tabs.sendMessage(tabInfo.tabId, { type: 'FORCE_REJECT' }, () => {
-          if (chrome.runtime.lastError) { /* ignore */ }
-          loadCurrentSite();
-          loadStats();
-          loadActivity();
-        });
-      }
-    });
-
-    // Add to whitelist from input
-    $('#btn-add-whitelist').addEventListener('click', () => {
-      addFromInput('whitelist');
-    });
-    $('#whitelist-input').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') addFromInput('whitelist');
-    });
-
-    // Add to blacklist from input
-    $('#btn-add-blacklist').addEventListener('click', () => {
-      addFromInput('blacklist');
-    });
-    $('#blacklist-input').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') addFromInput('blacklist');
-    });
-
-    // Settings toggles
-    const settingMap = {
-      'setting-auto-reject': 'autoReject',
-      'setting-untick-vendors': 'untickVendors',
-      'setting-dismiss-overlays': 'dismissOverlays',
-      'setting-tcf-api': 'useTCFApi',
-    };
-
-    for (const [id, key] of Object.entries(settingMap)) {
-      $(`#${id}`).addEventListener('change', async (e) => {
-        await sendMessage({
-          type: 'UPDATE_SETTINGS',
-          settings: { [key]: e.target.checked },
-        });
+    for (const { id, key } of toggles) {
+      $(id).addEventListener('change', async (e) => {
+        await sendMessage({ type: 'UPDATE_SETTINGS', settings: { [key]: e.target.checked } });
+        showToast(`${key} ${e.target.checked ? 'enabled' : 'disabled'}`);
       });
     }
+  }
 
-    // Reset stats
-    $('#btn-reset-stats').addEventListener('click', async () => {
-      if (confirm('Reset all stats and activity log? This cannot be undone.')) {
+  // ─── Reset Stats ───────────────────────────────────────────────────
+
+  function initResetStats() {
+    $('resetStatsBtn').addEventListener('click', async () => {
+      if (confirm('Reset all statistics and activity? This cannot be undone.')) {
         await sendMessage({ type: 'RESET_STATS' });
-        loadStats();
-        loadActivity();
+        await loadStats();
+        await loadActivity();
+        showToast('Stats reset');
       }
-    });
-
-    // Clear log
-    $('#btn-clear-log').addEventListener('click', async () => {
-      await sendMessage({ type: 'CLEAR_LOG' });
-      loadActivity();
     });
   }
 
-  async function addFromInput(listName) {
-    const input = $(`#${listName}-input`);
-    const domain = input.value.trim();
-    if (!domain) return;
+  // ─── Clear Log ─────────────────────────────────────────────────────
 
-    await sendMessage({ type: 'ADD_TO_LIST', list: listName, domain });
-    input.value = '';
-    loadLists();
+  function initClearLog() {
+    $('clearLogBtn').addEventListener('click', async () => {
+      await sendMessage({ type: 'CLEAR_LOG' });
+      await loadActivity();
+      showToast('Log cleared');
+    });
+  }
+
+  // ─── Import / Export ───────────────────────────────────────────────
+
+  function initImportExport() {
+    $('exportBtn').addEventListener('click', async () => {
+      const data = await sendMessage({ type: 'EXPORT_DATA' });
+      if (!data) { showToast('Export failed', true); return; }
+
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `cookiereject-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast('Data exported');
+    });
+
+    $('importBtn').addEventListener('click', () => {
+      $('importFile').click();
+    });
+
+    $('importFile').addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      try {
+        const text = await file.text();
+        const result = await sendMessage({ type: 'IMPORT_DATA', json: text });
+        if (result && result.success) {
+          showToast(`Imported (${result.keysImported} keys)`);
+          await Promise.all([loadStats(), loadLists(), loadSettings(), loadActivity()]);
+        } else {
+          showToast(result.error || 'Import failed', true);
+        }
+      } catch (err) {
+        showToast('Invalid file', true);
+      }
+      e.target.value = '';
+    });
+  }
+
+  // ─── Event Handlers ────────────────────────────────────────────────
+
+  function initEventHandlers() {
+    initMasterToggle();
+    initSiteActions();
+    initListHandlers();
+    initSettingsHandlers();
+    initResetStats();
+    initClearLog();
+    initImportExport();
+
+    // Enter key on list inputs
+    $('whitelistInput').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') $('addWhitelistBtn').click();
+    });
+    $('blacklistInput').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') $('addBlacklistBtn').click();
+    });
+  }
+
+  // ─── Smart Polling ─────────────────────────────────────────────────
+  // Only poll while the page might still be processing (not yet processed
+  // and within 30s of init). After that, stop to save resources.
+
+  let pollInterval = null;
+
+  function startSmartPolling() {
+    let pollCount = 0;
+    const maxPolls = 15; // 30 seconds at 2s intervals
+
+    pollInterval = setInterval(async () => {
+      pollCount++;
+      await loadCurrentSite();
+      await loadStats();
+
+      // Stop polling after max attempts or if processed
+      if (pollCount >= maxPolls) {
+        clearInterval(pollInterval);
+        return;
+      }
+
+      const statusText = document.querySelector('.status-text').textContent;
+      if (statusText.startsWith('Rejected') || statusText.startsWith('No banner')) {
+        clearInterval(pollInterval);
+      }
+    }, 2000);
   }
 
   // ─── Initialize ─────────────────────────────────────────────────────
+
   async function init() {
+    loadVersion();
     initTabs();
     initEventHandlers();
     await Promise.all([
@@ -341,17 +453,10 @@
       loadLists(),
       loadSettings(),
     ]);
-
-    // Poll for updates while popup is open.
-    // This catches: (a) content script completing rejection after popup opened,
-    // (b) stats changing from other tabs, (c) status changes.
-    setInterval(() => {
-      loadCurrentSite();
-      loadStats();
-    }, 2000);
+    startSmartPolling();
   }
 
-  // Run when DOM is ready
+  // ─── Boot ──────────────────────────────────────────────────────────
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);
   } else {

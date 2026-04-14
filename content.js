@@ -14,9 +14,23 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
 (function () {
   'use strict';
 
-  // ─── Prevent double-injection in iframes ────────────────────────────
+  // ─── Prevent double-injection and skip non-top frames ──────────────
+  // Cookie consent banners always live in the top-level frame. Running
+  // in every iframe wastes resources: N iframes = N Engine instances,
+  // N MutationObservers, N intervals all scanning for banners that will
+  // never appear there.
   if (window.__cookieRejectLoaded) return;
   window.__cookieRejectLoaded = true;
+  if (window !== window.top) return;
+
+  // ─── Debug Logging ──────────────────────────────────────────────────
+  // Toggle via popup settings. Outputs to console when debugMode is on.
+  let _debugMode = false;
+  const DebugLog = {
+    log(...args) { if (_debugMode) console.log('[CookieReject]', ...args); },
+    warn(...args) { if (_debugMode) console.warn('[CookieReject]', ...args); },
+    error(...args) { console.error('[CookieReject]', ...args); },
+  };
 
   // ─── Configuration ──────────────────────────────────────────────────
   const CONFIG = {
@@ -104,10 +118,14 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
 
     /**
      * Find a button or link by its visible text content (case-insensitive, partial match).
+     * Only returns elements that are actually visible on the page.
      */
     findByText(text, root = document, tag = '*') {
       const elements = root.querySelectorAll(tag);
       for (const el of elements) {
+        // Skip invisible elements (defense in depth against hidden
+        // decoy elements that could trick the extension into clicking)
+        if (!this.isVisible(el)) continue;
         const txt = (el.textContent || '').trim().toLowerCase();
         if (txt.includes(text.toLowerCase())) return el;
       }
@@ -1690,36 +1708,51 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     observerActive: false,
     initTimestamp: Date.now(),
     lastFailedAttempt: 0,
+    settings: {
+      autoReject: true,
+      untickVendors: true,
+      dismissOverlays: true,
+      useTCFApi: true,
+      debugMode: false,
+    },
 
     async init() {
       if (this.initialized) return;
       this.initialized = true;
 
-      // Start detection IMMEDIATELY -- do not wait for async status checks.
-      // Some banners appear very quickly after DOM ready, and the async
-      // sendMessage calls can delay the observer setup enough to miss them.
-      this.detectAndReject();
+      // Fetch full settings from background (non-blocking).
+      // These control what the engine is allowed to do.
+      this.sendMessage({ type: 'GET_FULL_SETTINGS' }).then((settings) => {
+        if (settings) {
+          this.settings = { ...this.settings, ...settings };
+          _debugMode = this.settings.debugMode;
+          DebugLog.log('Settings loaded:', this.settings);
 
-      // Check settings in the background (non-blocking)
-      this.sendMessage({ type: 'GET_STATUS' }).then((response) => {
-        if (response && !response.enabled) {
-          this.processed = true; // prevent any action
-          if (this.observerActive) {
-            this.observerActive = false;
-            this.observer.disconnect();
+          // If autoReject is OFF or extension disabled, stop immediately.
+          if (!settings.enabled || !settings.autoReject) {
+            this.processed = true;
+            if (this.observerActive) {
+              this.observerActive = false;
+              this.observer.disconnect();
+            }
           }
         }
       });
 
+      // Check whitelist (non-blocking)
       this.sendMessage({ type: 'CHECK_LIST', domain: this.getDomain() }).then((listCheck) => {
         if (listCheck && listCheck.whitelisted) {
           this.processed = true;
+          DebugLog.log('Site whitelisted, skipping:', this.getDomain());
           if (this.observerActive) {
             this.observerActive = false;
             this.observer.disconnect();
           }
         }
       });
+
+      // Start detection -- runs immediately, settings will abort if needed
+      this.detectAndReject();
     },
 
     async detectAndReject() {
@@ -1737,12 +1770,20 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       // for the entire watch window. DOM pages can produce hundreds of
       // mutations per second during load, which was exhausting the shared
       // retries counter before the banner even appeared.
+      //
+      // Throttled to fire at most once every 300ms. Without this,
+      // detect() runs 30+ querySelector calls + getComputedStyle on
+      // every single DOM mutation -- extremely expensive during page load.
       this.observerActive = true;
+      let lastObserverDetect = 0;
       this.observer = new MutationObserver(() => {
         if (this.processed || !this.observerActive) {
           this.observer.disconnect();
           return;
         }
+        const now = Date.now();
+        if (now - lastObserverDetect < 300) return; // throttle
+        lastObserverDetect = now;
 
         const cmp = CMPDetector.detect();
         if (cmp) {
@@ -1809,6 +1850,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       if (!handler.detect()) return;
 
       this.currentCMP = cmpInfo;
+      DebugLog.log('Detected CMP:', cmpInfo.name, 'on', this.getDomain());
 
       try {
         // Small delay to let the banner fully render and its JS initialize.
@@ -1820,12 +1862,19 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
 
         // Run the CMP-specific rejection
         const result = await handler.reject();
+        DebugLog.log('Handler result:', result);
 
         // Also try TCF API rejection for any IAB-compliant CMP
-        const tcfResult = await TCFApiHandler.reject();
+        // (only if the setting is enabled)
+        let tcfResult = false;
+        if (this.settings.useTCFApi) {
+          tcfResult = await TCFApiHandler.reject();
+        }
 
-        // Hide any remaining overlays
-        BannerHider.hide();
+        // Hide any remaining overlays (only if setting is enabled)
+        if (this.settings.dismissOverlays) {
+          BannerHider.hide();
+        }
 
         // Verify the banner actually disappeared.
         // Handlers return rejected > 0 even when the click did nothing
@@ -1839,6 +1888,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
           // The click was a false positive -- the JS wasn't ready.
           // Don't mark as processed so the observer/interval can retry.
           this.lastFailedAttempt = Date.now();
+          DebugLog.warn('False positive -- banner still visible after rejection');
           return;
         }
 
@@ -1847,6 +1897,8 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
           this.processed = true;
 
           const domain = this.getDomain();
+          // Strip query params and hash from URL for privacy
+          const safeUrl = window.location.href.split('?')[0].split('#')[0];
           await this.sendMessage({
             type: 'LOG_ACTION',
             data: {
@@ -1855,56 +1907,67 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
               rejected: result.rejected,
               vendorsUnticked: result.vendorsUnticked,
               timestamp: Date.now(),
-              url: window.location.href,
+              url: safeUrl,
             },
           });
+          DebugLog.log('Logged action:', domain, cmpInfo.name);
         }
       } catch (e) {
-        // Silently handle errors - we don't want to break the page
-        console.debug('[CookieReject] Error handling CMP:', e.message);
+        DebugLog.error('Error handling CMP:', e.message);
       }
     },
 
     /**
      * Check if the banner from a previously detected CMP is still visible.
-     * Used to verify that a rejection actually worked (not a false positive
-     * from clicking a button before its JS initialized).
+     * Uses the handler's detect() method dynamically instead of a hardcoded
+     * list of selectors -- so adding a new handler automatically updates this.
      */
     isBannerStillVisible(cmpInfo) {
       const handler = CMPHandlers[cmpInfo.id];
       if (!handler || !handler.detect()) return false;
 
       // The handler's detect() returned true, meaning the banner element
-      // is still in the DOM. Check if it's actually visible.
-      // Look for the most specific banner element we can find.
-      const bannerSelectors = [
-        '#lgcookieslaw_banner',
-        '#onetrust-banner-sdk',
-        '#CybotCookiebotDialog',
-        '#didomi-popup',
-        '#cmpbox',
-        '#BorlabsCookieBox',
-        '.cky-consent-bar',
-        '.qc-cmp2-container',
-        '#fides-banner',
-        '#ketch-consent-banner',
-        '[class*="privacy-cookie"]',
-        '[class*="cookie-banner"]',
-        '[class*="cookie-consent"]',
-        '[class*="consent-banner"]',
-      ];
-
-      for (const sel of bannerSelectors) {
-        const el = document.querySelector(sel);
-        if (el) {
-          const style = getComputedStyle(el);
-          if (style.display !== 'none' && style.visibility !== 'hidden' && parseFloat(style.opacity) > 0) {
-            return true; // banner is still visible
-          }
-        }
+      // is still in the DOM. For the generic handler, detect() already
+      // checks visibility. For specific handlers, we need to find the
+      // actual banner element and check its computed style.
+      if (cmpInfo.id === 'generic') {
+        // detectGeneric() already checks isVisible, so if detect()
+        // returned true, the banner IS visible.
+        return true;
       }
 
-      return false; // banner was hidden or removed
+      // For specific CMPs, check known primary selectors.
+      // These are the main banner container IDs/classes used by each handler.
+      const primarySelectors = {
+        onetrust: '#onetrust-banner-sdk',
+        fides: '#fides-banner-container, #fides-banner',
+        ketch: '#ketch-consent-banner, #ketch-banner',
+        cookiebot: '#CybotCookiebotDialog',
+        didomi: '#didomi-popup',
+        sourcepoint: '.sp_message_container, [class*="sp_veil"]',
+        trustarc: '#truste-consent-track, .trustarc-banner',
+        quantcast: '.qc-cmp2-container',
+        usercentrics: '#usercentrics-root',
+        cookieyes: '.cky-consent-bar',
+        iubenda: '.iubenda-cs-banner',
+        consentmanager: '#cmpbox',
+        sirdata: '#sd-cmp',
+        ezcookie: '#ez-cookie-dialog',
+        borlabs: '#BorlabsCookieBox',
+        lgcookieslaw: '#lgcookieslaw_banner',
+      };
+
+      const sel = primarySelectors[cmpInfo.id];
+      if (!sel) {
+        // Unknown CMP -- fall back to generic overlay check
+        const generic = document.querySelector(
+          '[class*="cookie-banner"], [class*="cookie-consent"], [class*="consent-banner"]'
+        );
+        return generic ? Utils.isVisible(generic) : false;
+      }
+
+      const el = document.querySelector(sel);
+      return el ? Utils.isVisible(el) : false;
     },
 
     getDomain() {

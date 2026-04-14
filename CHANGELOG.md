@@ -2,6 +2,40 @@
 
 All notable changes to CookieReject will be documented in this file.
 
+## [1.3.0] - 2026-04-14
+
+### Fixed
+- Duplicated primarySelectors map between isCMPBannerVisible() and isBannerStillVisible() extracted to shared constant
+- Detection cache not invalidated on handler failure (stale cache could delay retries)
+- Shadow DOM scan iterated ALL elements on every detection -- now caches known hosts
+- CookieYes handler could use "Accept" button as save button -- now prefers reject/save buttons
+- False-positive warning now reports which CSS selector is still visible for easier debugging
+- Import validation allowed string values in numeric stat fields
+- Clear Log button had no confirmation (Reset Stats did, but Clear didn't)
+- Log entry IDs used Date.now() + 4 random chars -- now uses monotonic counter for guaranteed uniqueness
+
+### Performance
+- isVisible() adds cheap inline `display:none` check before expensive getComputedStyle
+- Generic handler reject texts now batched into single DOM pass (was 60+ individual scans)
+- Badge updates debounced (500ms) to avoid storage reads on every tab completion
+- Shadow DOM host elements cached after first scan
+
+### Architecture
+- Settings changes now propagate live to already-loaded content scripts (no page reload needed)
+- Mouse clicks use dispatchEvent(new MouseEvent) for more realistic click simulation
+- Guard global renamed to unique `__cookieReject_ext_v1x2x0` to avoid conflicts
+
+### UX/UI
+- Confirm modal now closes on Escape key and overlay background click
+- Activity log has search/filter input for finding specific domains
+- Tab bar has keyboard navigation (arrow keys) and ARIA attributes
+- Status indicator more prominent with colored text matching state
+- Toast z-index raised above modal overlay
+- Popup body has max-width safety net
+
+### Docs
+- Test file notes that utility functions are duplicated (not imported) and must be kept in sync
+
 ## [1.2.0] - 2026-04-14
 
 ### Fixed

@@ -82,23 +82,51 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
 
   // ─── Tab Management ────────────────────────────────────────────────
 
-  function initTabs() {
-    document.querySelectorAll('.tab').forEach((tab) => {
-      tab.addEventListener('click', () => {
-        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-        document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-        tab.classList.add('active');
-        $('tab-' + tab.dataset.tab).classList.add('active');
+  function switchTab(tab) {
+    document.querySelectorAll('.tab').forEach(t => {
+      t.classList.remove('active');
+      t.setAttribute('aria-selected', 'false');
+    });
+    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+    tab.classList.add('active');
+    tab.setAttribute('aria-selected', 'true');
+    $('tab-' + tab.dataset.tab).classList.add('active');
 
-        // Refresh data when switching tabs (Fix #19)
-        const tabName = tab.dataset.tab;
-        if (tabName === 'dashboard') {
-          loadStats();
-          loadCurrentSite();
-        } else if (tabName === 'activity') {
-          loadActivity();
-        } else if (tabName === 'lists') {
-          loadLists();
+    // Refresh data when switching tabs (Fix #19)
+    const tabName = tab.dataset.tab;
+    if (tabName === 'dashboard') {
+      loadStats();
+      loadCurrentSite();
+    } else if (tabName === 'activity') {
+      loadActivity();
+    } else if (tabName === 'lists') {
+      loadLists();
+    }
+  }
+
+  function initTabs() {
+    const tabs = document.querySelectorAll('.tab');
+    tabs.forEach((tab) => {
+      tab.addEventListener('click', () => switchTab(tab));
+      tab.setAttribute('role', 'tab');
+      tab.setAttribute('aria-selected', tab.classList.contains('active') ? 'true' : 'false');
+    });
+
+    // Arrow key navigation between tabs (Fix #16)
+    tabs.forEach((tab) => {
+      tab.addEventListener('keydown', (e) => {
+        const tabList = Array.from(tabs);
+        const idx = tabList.indexOf(tab);
+        let newIdx = -1;
+        if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+          newIdx = (idx + 1) % tabList.length;
+        } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+          newIdx = (idx - 1 + tabList.length) % tabList.length;
+        }
+        if (newIdx >= 0) {
+          e.preventDefault();
+          tabList[newIdx].focus();
+          switchTab(tabList[newIdx]);
         }
       });
     });
@@ -199,22 +227,34 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
 
   // Fix #23: pagination state
   let activityLimit = 30;
+  let _allActivityEntries = [];
 
   async function loadActivity(loadMore = false) {
-    if (!loadMore) activityLimit = 30;
-    else activityLimit += 30;
+    if (!loadMore) {
+      activityLimit = 30;
+      $('activitySearch').value = '';
+      const log = await sendMessage({ type: 'GET_LOG', limit: 500 });
+      _allActivityEntries = log || [];
+    } else {
+      activityLimit += 30;
+    }
 
-    const log = await sendMessage({ type: 'GET_LOG', limit: activityLimit });
+    const searchTerm = ($('activitySearch').value || '').trim().toLowerCase();
+    const filtered = searchTerm
+      ? _allActivityEntries.filter(e => (e.domain || '').toLowerCase().includes(searchTerm))
+      : _allActivityEntries;
+
+    const visible = filtered.slice(0, activityLimit);
     const container = $('activityList');
 
-    if (!log || log.length === 0) {
-      container.innerHTML = '<div class="empty-state">No activity yet</div>';
+    if (visible.length === 0) {
+      container.innerHTML = '<div class="empty-state">' + (_allActivityEntries.length === 0 ? 'No activity yet' : 'No matches') + '</div>';
       $('loadMoreBtn').style.display = 'none';
       return;
     }
 
     // Fix #22: show vendorsUnticked badge; background.js LOG_ACTION already stores it
-    container.innerHTML = log.map(entry => `
+    container.innerHTML = visible.map(entry => `
       <div class="activity-item">
         <div>
           <div class="activity-domain" title="${escapeHTML(entry.domain)}">${escapeHTML(entry.domain)}</div>
@@ -228,7 +268,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     `).join('');
 
     // Fix #23: show/hide "Load more" button
-    $('loadMoreBtn').style.display = log.length >= activityLimit ? 'block' : 'none';
+    $('loadMoreBtn').style.display = filtered.length > activityLimit ? 'block' : 'none';
   }
 
   // ─── Lists ─────────────────────────────────────────────────────────
@@ -377,13 +417,19 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         $('confirmModal').classList.remove('active');
         $('confirmOk').removeEventListener('click', onOk);
         $('confirmCancel').removeEventListener('click', onCancel);
+        document.removeEventListener('keydown', onEscape);
+        $('confirmModal').removeEventListener('click', onOverlayClick);
       };
 
       const onOk = () => { cleanup(); resolve(true); };
       const onCancel = () => { cleanup(); resolve(false); };
+      const onEscape = (e) => { if (e.key === 'Escape') { cleanup(); resolve(false); } };
+      const onOverlayClick = (e) => { if (e.target === $('confirmModal')) { cleanup(); resolve(false); } };
 
       $('confirmOk').addEventListener('click', onOk);
       $('confirmCancel').addEventListener('click', onCancel);
+      document.addEventListener('keydown', onEscape);
+      $('confirmModal').addEventListener('click', onOverlayClick);
     });
   }
 
@@ -403,9 +449,12 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
 
   function initClearLog() {
     $('clearLogBtn').addEventListener('click', async () => {
-      await sendMessage({ type: 'CLEAR_LOG' });
-      await loadActivity();
-      showToast('Log cleared');
+      const confirmed = await showConfirm('Clear all activity log entries?');
+      if (confirmed) {
+        await sendMessage({ type: 'CLEAR_LOG' });
+        await loadActivity();
+        showToast('Log cleared');
+      }
     });
   }
 
@@ -471,6 +520,36 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
 
     // Fix #23: Load more activity entries
     $('loadMoreBtn').addEventListener('click', () => loadActivity(true));
+
+    // Activity search filter (Fix #13)
+    $('activitySearch').addEventListener('input', () => {
+      activityLimit = 30;
+      // Re-render from cached entries
+      const searchTerm = ($('activitySearch').value || '').trim().toLowerCase();
+      const filtered = searchTerm
+        ? _allActivityEntries.filter(e => (e.domain || '').toLowerCase().includes(searchTerm))
+        : _allActivityEntries;
+      const visible = filtered.slice(0, activityLimit);
+      const container = $('activityList');
+      if (visible.length === 0) {
+        container.innerHTML = '<div class="empty-state">' + (_allActivityEntries.length === 0 ? 'No activity yet' : 'No matches') + '</div>';
+        $('loadMoreBtn').style.display = 'none';
+        return;
+      }
+      container.innerHTML = visible.map(entry => `
+        <div class="activity-item">
+          <div>
+            <div class="activity-domain" title="${escapeHTML(entry.domain)}">${escapeHTML(entry.domain)}</div>
+            <div class="activity-meta">
+              <span class="activity-cmp">${escapeHTML(entry.cmp || 'Unknown')}</span>
+              ${entry.vendorsUnticked ? '<span class="activity-badge">' + entry.vendorsUnticked + ' vendors</span>' : ''}
+            </div>
+          </div>
+          <span class="activity-time">${formatTimestamp(entry.timestamp)}</span>
+        </div>
+      `).join('');
+      $('loadMoreBtn').style.display = filtered.length > activityLimit ? 'block' : 'none';
+    });
   }
 
   // ─── Smart Polling ─────────────────────────────────────────────────

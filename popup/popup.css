@@ -26,6 +26,7 @@
 
 body {
   width: 380px;
+  max-width: 100vw;
   min-height: 300px;
   max-height: 580px;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -215,6 +216,9 @@ body {
   gap: 6px;
   margin-bottom: 10px;
   font-size: 12px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
 }
 
 .status-dot {
@@ -227,6 +231,13 @@ body {
 .status-dot.active { background: var(--green); }
 .status-dot.warning { background: var(--orange); }
 .status-dot.error { background: var(--red); }
+
+.status-text {
+  font-weight: 500;
+}
+.status-dot.active + .status-text { color: var(--green); }
+.status-dot.warning + .status-text { color: var(--orange); }
+.status-dot.error + .status-text { color: var(--red); }
 
 .site-actions {
   display: flex;
@@ -520,7 +531,7 @@ body {
   border-radius: var(--radius-sm);
   font-size: 12px;
   font-weight: 500;
-  z-index: 100;
+  z-index: 300;
   opacity: 0;
   transition: all 0.3s ease;
   pointer-events: none;

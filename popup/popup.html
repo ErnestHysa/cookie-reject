@@ -24,7 +24,7 @@
     </header>
 
     <!-- Tab Bar -->
-    <nav class="tab-bar">
+    <nav class="tab-bar" role="tablist">
       <button class="tab active" data-tab="dashboard">Dashboard</button>
       <button class="tab" data-tab="activity">Activity</button>
       <button class="tab" data-tab="lists">Lists</button>
@@ -73,6 +73,7 @@
         <h3>Recent Activity</h3>
         <button class="btn btn-sm btn-outline" id="clearLogBtn">Clear</button>
       </div>
+      <input type="text" id="activitySearch" placeholder="Filter by domain..." class="input activity-search">
       <div class="activity-list" id="activityList">
         <div class="empty-state">No activity yet</div>
       </div>

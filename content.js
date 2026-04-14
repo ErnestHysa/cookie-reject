@@ -19,8 +19,8 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   // in every iframe wastes resources: N iframes = N Engine instances,
   // N MutationObservers, N intervals all scanning for banners that will
   // never appear there.
-  if (window.__cookieRejectLoaded) return;
-  window.__cookieRejectLoaded = true;
+  if (window.__cookieReject_ext_v1x2x0) return;
+  window.__cookieReject_ext_v1x2x0 = true;
   if (window !== window.top) return;
 
   // ─── Debug Logging ──────────────────────────────────────────────────
@@ -70,6 +70,8 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       // Cheap check: if offsetParent exists, element is definitely visible
       // (offsetParent is null only for display:none or position:fixed)
       if (el.offsetParent !== null) return true;
+      // Quick check: if element or its direct parent has inline display:none
+      if (el.style.display === 'none') return false;
       // offsetParent is null -- could be display:none or position:fixed
       const style = getComputedStyle(el);
       if (style.display === 'none') return false;
@@ -130,7 +132,8 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
           : selectorOrElement;
       if (!el) return false;
       el.scrollIntoView({ block: 'center', behavior: 'instant' });
-      el.click();
+      // Use MouseEvent for more realistic clicks that CMPs are less likely to reject
+      el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
       return true;
     },
 
@@ -362,10 +365,15 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         if (el && Utils.isVisible(el)) return true;
       }
 
-      // Also check inside Shadow DOMs
-      const hosts = document.querySelectorAll('*');
-      for (const host of hosts) {
-        if (!host.shadowRoot) continue;
+      // Also check inside Shadow DOMs (cache known hosts)
+      if (!this._shadowHosts) {
+        this._shadowHosts = [];
+        const all = document.querySelectorAll('*');
+        for (const el of all) {
+          if (el.shadowRoot) this._shadowHosts.push(el);
+        }
+      }
+      for (const host of this._shadowHosts) {
         for (const sel of bannerIndicators) {
           const el = host.shadowRoot.querySelector(sel);
           if (el && Utils.isVisible(el)) return true;
@@ -373,6 +381,11 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       }
 
       return false;
+    },
+
+    invalidateCache() {
+      this._lastDetection = null;
+      this._shadowHosts = null;
     },
   };
 
@@ -1079,9 +1092,11 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         }
 
         const saveBtn =
-          modal.querySelector('[data-cky-tag="accept-button"]') ||
+          modal.querySelector('[data-cky-tag="reject-button"], [data-cky-tag="save-button"]') ||
+          Utils.findByText('save preferences', modal, 'button') ||
           Utils.findByText('save', modal, 'button') ||
-          Utils.findByText('confirm', modal, 'button');
+          Utils.findByText('confirm', modal, 'button') ||
+          Utils.findByText('reject all', modal, 'button');
         if (saveBtn) {
           saveBtn.click();
           rejected++;
@@ -1455,9 +1470,17 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       'opslaan', 'bevestigen', 'voorkeuren opslaan',
     ];
 
-    // Find and click reject button first
-    for (const text of rejectTexts) {
-      const btn = Utils.findByText(text, document, 'button, a, span, div');
+    // Find and click reject button -- single DOM pass for all patterns
+    const rejectBtns = Utils.findAllByText(rejectTexts, document, 'button, a, span, div');
+    if (rejectBtns.length > 0) {
+      // Pick the best match: prefer buttons with exact-ish text over partial matches
+      // (e.g. "Reject All" over "I reject everything and leave")
+      const btn = rejectBtns.reduce((best, el) => {
+        const txt = (el.textContent || '').trim().toLowerCase();
+        // Prefer shorter matches (more specific button text)
+        if (!best || txt.length < best._len) return Object.assign(el, { _len: txt.length });
+        return best;
+      }, null);
       if (btn) {
         btn.click();
         rejected++;
@@ -1664,6 +1687,26 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
 
   // ─── Main Engine ────────────────────────────────────────────────────
   const Engine = {
+    // Shared map of primary banner selectors per CMP.
+    // Used by both isCMPBannerVisible() and isBannerStillVisible().
+    _primarySelectors: {
+      onetrust: '#onetrust-banner-sdk',
+      fides: '#fides-banner-container, #fides-banner',
+      ketch: '#ketch-consent-banner, #ketch-banner',
+      cookiebot: '#CybotCookiebotDialog',
+      didomi: '#didomi-popup',
+      sourcepoint: '.sp_message_container, [class*="sp_veil"]',
+      trustarc: '#truste-consent-track, .trustarc-banner',
+      quantcast: '.qc-cmp2-container',
+      usercentrics: '#usercentrics-root',
+      cookieyes: '.cky-consent-bar',
+      iubenda: '.iubenda-cs-banner',
+      consentmanager: '#cmpbox',
+      sirdata: '#sd-cmp',
+      ezcookie: '#ez-cookie-dialog',
+      borlabs: '#BorlabsCookieBox',
+      lgcookieslaw: '#lgcookieslaw_banner',
+    },
     initialized: false,
     intervalRetries: 0,
     processed: false,
@@ -1878,7 +1921,10 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
           // The click was a false positive -- the JS wasn't ready.
           // Don't mark as processed so the observer/interval can retry.
           this.lastFailedAttempt = Date.now();
-          DebugLog.warn('False positive -- banner still visible after rejection');
+          const visibleSel = this._primarySelectors[cmpInfo.id] || 'unknown';
+          DebugLog.warn('False positive -- banner still visible after rejection. Selector:', visibleSel);
+          // Invalidate cache so retries get fresh detection
+          CMPDetector.invalidateCache();
           return;
         }
 
@@ -1886,7 +1932,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         if (result.rejected > 0 || result.vendorsUnticked > 0 || tcfResult) {
           this.processed = true;
           // Invalidate detection cache -- page state changed after rejection
-          CMPDetector._lastDetection = null;
+          CMPDetector.invalidateCache();
 
           const domain = this.getDomain();
           // Strip query params and hash from URL for privacy
@@ -1916,26 +1962,8 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
      * already dismissed/hidden.
      */
     isCMPBannerVisible(cmpId) {
-      const primarySelectors = {
-        onetrust: '#onetrust-banner-sdk',
-        fides: '#fides-banner-container, #fides-banner',
-        ketch: '#ketch-consent-banner, #ketch-banner',
-        cookiebot: '#CybotCookiebotDialog',
-        didomi: '#didomi-popup',
-        sourcepoint: '.sp_message_container, [class*="sp_veil"]',
-        trustarc: '#truste-consent-track, .trustarc-banner',
-        quantcast: '.qc-cmp2-container',
-        usercentrics: '#usercentrics-root',
-        cookieyes: '.cky-consent-bar',
-        iubenda: '.iubenda-cs-banner',
-        consentmanager: '#cmpbox',
-        sirdata: '#sd-cmp',
-        ezcookie: '#ez-cookie-dialog',
-        borlabs: '#BorlabsCookieBox',
-        lgcookieslaw: '#lgcookieslaw_banner',
-      };
 
-      const sel = primarySelectors[cmpId];
+      const sel = this._primarySelectors[cmpId];
       if (!sel) {
         // Unknown CMP -- no selector to check, assume visible
         return true;
@@ -1974,26 +2002,8 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
 
       // For specific CMPs, check known primary selectors.
       // These are the main banner container IDs/classes used by each handler.
-      const primarySelectors = {
-        onetrust: '#onetrust-banner-sdk',
-        fides: '#fides-banner-container, #fides-banner',
-        ketch: '#ketch-consent-banner, #ketch-banner',
-        cookiebot: '#CybotCookiebotDialog',
-        didomi: '#didomi-popup',
-        sourcepoint: '.sp_message_container, [class*="sp_veil"]',
-        trustarc: '#truste-consent-track, .trustarc-banner',
-        quantcast: '.qc-cmp2-container',
-        usercentrics: '#usercentrics-root',
-        cookieyes: '.cky-consent-bar',
-        iubenda: '.iubenda-cs-banner',
-        consentmanager: '#cmpbox',
-        sirdata: '#sd-cmp',
-        ezcookie: '#ez-cookie-dialog',
-        borlabs: '#BorlabsCookieBox',
-        lgcookieslaw: '#lgcookieslaw_banner',
-      };
 
-      const sel = primarySelectors[cmpInfo.id];
+      const sel = this._primarySelectors[cmpInfo.id];
       if (!sel) {
         // Unknown CMP -- fall back to generic overlay check
         const generic = document.querySelector(
@@ -2066,6 +2076,22 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
           domain: Engine.getDomain(),
         }).then(() => sendResponse({ added: true }));
         return true; // async response
+      } else if (message.type === 'SETTINGS_UPDATED') {
+        // Live-update settings without page reload (Fix #9)
+        if (message.settings) {
+          Engine.settings = { ...Engine.settings, ...message.settings };
+          _debugMode = Engine.settings.debugMode;
+          DebugLog.log('Settings updated live:', message.settings);
+          // If extension was disabled, stop processing
+          if (!message.settings.enabled || !message.settings.autoReject) {
+            Engine.processed = true;
+            if (Engine.observerActive) {
+              Engine.observerActive = false;
+              Engine.observer.disconnect();
+            }
+          }
+        }
+        sendResponse({ updated: true });
       }
     });
   }

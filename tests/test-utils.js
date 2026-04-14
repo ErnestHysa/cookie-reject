@@ -4,6 +4,11 @@
  * 
  * These tests cover pure functions that don't need a browser environment.
  * For full integration testing, load the extension in a browser.
+ *
+ * NOTE: Functions like extractBaseDomain, domainMatches, escapeHTML, and
+ * isValidLogEntry are re-implemented here rather than imported from
+ * background.js / content.js because Manifest V3 extensions don't use ES
+ * modules. If the source implementations change, update these copies too.
  */
 
 let passed = 0;

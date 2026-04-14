@@ -248,11 +248,13 @@
 
   // ─── Activity Log ───────────────────────────────────────────────────
   const LogManager = {
+    _idCounter: 0,
+
     async add(entry) {
       const log = await Storage.get(STORAGE_KEYS.LOG, []);
 
       log.unshift({
-        id: Date.now() + Math.random().toString(36).slice(2, 6),
+        id: `${Date.now()}-${++LogManager._idCounter}`,
         ...entry,
       });
 
@@ -441,6 +443,13 @@
       if (key === STORAGE_KEYS.STATS) {
         if (!value || typeof value !== 'object' || Array.isArray(value)) {
           return { valid: false, sanitizedValue: null };
+        }
+        // Explicitly check expected numeric fields
+        const numericFields = ['totalRejected', 'totalUniqueSites', 'totalVendorsUnticked', 'totalSitesProtected', 'cookiesRejected', 'bannersRejected', 'vendorsUnticked'];
+        for (const nf of numericFields) {
+          if (value[nf] !== undefined && typeof value[nf] !== 'number') {
+            return { valid: false, sanitizedValue: null };
+          }
         }
         for (const [k, v] of Object.entries(value)) {
           if (typeof v === 'number' && (!Number.isInteger(v) || v < 0)) {
@@ -676,6 +685,14 @@
 
         case 'UPDATE_SETTINGS': {
           const updated = await SettingsManager.update(message.settings);
+          // Broadcast settings change to all content scripts
+          chrome.tabs.query({}, (tabs) => {
+            for (const t of tabs) {
+              chrome.tabs.sendMessage(t.id, { type: 'SETTINGS_UPDATED', settings: updated }, () => {
+                if (chrome.runtime.lastError) { /* tab not receptive */ }
+              });
+            }
+          });
           return updated;
         }
 
@@ -755,6 +772,8 @@
   });
 
   // ─── Badge Management ───────────────────────────────────────────────
+  let _badgeUpdateTimer = null;
+
   const Badge = {
     async update() {
       const stats = await StatsManager.get();
@@ -773,7 +792,8 @@
   // ─── Tab Update Listener ────────────────────────────────────────────
   chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     if (changeInfo.status === 'complete' && tab.url && tab.url.startsWith('http')) {
-      Badge.update();
+      clearTimeout(_badgeUpdateTimer);
+      _badgeUpdateTimer = setTimeout(() => Badge.update(), 500);
     }
   });
 

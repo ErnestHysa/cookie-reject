@@ -1663,6 +1663,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     observer: null,
     observerActive: false,
     initTimestamp: Date.now(),
+    lastFailedAttempt: 0,
 
     async init() {
       if (this.initialized) return;
@@ -1700,7 +1701,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       const cmp = CMPDetector.detect();
       if (cmp) {
         await this.handleCMP(cmp);
-        return;
+        // Only return if rejection was verified successful
+        if (this.processed) return;
+        // Otherwise fall through to observer + interval for retry
       }
 
       // Set up MutationObserver for dynamic banner injection.
@@ -1766,6 +1769,13 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     async handleCMP(cmpInfo) {
       if (this.processed) return;
 
+      // Cooldown: if the last attempt failed verification, wait before
+      // retrying. This prevents tight retry loops clicking the same
+      // non-functional button every 500ms.
+      if (this.lastFailedAttempt && (Date.now() - this.lastFailedAttempt < 3000)) {
+        return;
+      }
+
       const handler = CMPHandlers[cmpInfo.id];
       if (!handler) return;
 
@@ -1775,8 +1785,12 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       this.currentCMP = cmpInfo;
 
       try {
-        // Small delay to let the banner fully render
-        await Utils.sleep(300);
+        // Small delay to let the banner fully render and its JS initialize.
+        // Many CMPs inject their HTML server-side but attach click handlers
+        // via async JavaScript. Without this wait, we click buttons that
+        // have no event listeners yet -- the click does nothing, but we
+        // count it as a success and mark processed=true.
+        await Utils.sleep(800);
 
         // Run the CMP-specific rejection
         const result = await handler.reject();
@@ -1786,6 +1800,21 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
 
         // Hide any remaining overlays
         BannerHider.hide();
+
+        // Verify the banner actually disappeared.
+        // Handlers return rejected > 0 even when the click did nothing
+        // (e.g. button existed in DOM but its JS event listener wasn't
+        // attached yet). Re-detect the CMP to check if the banner is
+        // still present and visible.
+        const stillVisible = this.isBannerStillVisible(cmpInfo);
+
+        if (stillVisible && result.rejected > 0) {
+          // The handler claimed success but the banner is still there.
+          // The click was a false positive -- the JS wasn't ready.
+          // Don't mark as processed so the observer/interval can retry.
+          this.lastFailedAttempt = Date.now();
+          return;
+        }
 
         // Report results
         if (result.rejected > 0 || result.vendorsUnticked > 0 || tcfResult) {
@@ -1808,6 +1837,48 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         // Silently handle errors - we don't want to break the page
         console.debug('[CookieReject] Error handling CMP:', e.message);
       }
+    },
+
+    /**
+     * Check if the banner from a previously detected CMP is still visible.
+     * Used to verify that a rejection actually worked (not a false positive
+     * from clicking a button before its JS initialized).
+     */
+    isBannerStillVisible(cmpInfo) {
+      const handler = CMPHandlers[cmpInfo.id];
+      if (!handler || !handler.detect()) return false;
+
+      // The handler's detect() returned true, meaning the banner element
+      // is still in the DOM. Check if it's actually visible.
+      // Look for the most specific banner element we can find.
+      const bannerSelectors = [
+        '#lgcookieslaw_banner',
+        '#onetrust-banner-sdk',
+        '#CybotCookiebotDialog',
+        '#didomi-popup',
+        '#cmpbox',
+        '#BorlabsCookieBox',
+        '.cky-consent-bar',
+        '.qc-cmp2-container',
+        '#fides-banner',
+        '#ketch-consent-banner',
+        '[class*="privacy-cookie"]',
+        '[class*="cookie-banner"]',
+        '[class*="cookie-consent"]',
+        '[class*="consent-banner"]',
+      ];
+
+      for (const sel of bannerSelectors) {
+        const el = document.querySelector(sel);
+        if (el) {
+          const style = getComputedStyle(el);
+          if (style.display !== 'none' && style.visibility !== 'hidden' && parseFloat(style.opacity) > 0) {
+            return true; // banner is still visible
+          }
+        }
+      }
+
+      return false; // banner was hidden or removed
     },
 
     getDomain() {
@@ -1852,6 +1923,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       } else if (message.type === 'FORCE_REJECT') {
         Engine.processed = false;
         Engine.intervalRetries = 0;
+        Engine.lastFailedAttempt = 0;
         Engine.detectAndReject();
         sendResponse({ started: true });
       } else if (message.type === 'WHITELIST_SITE') {

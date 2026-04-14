@@ -1,10 +1,15 @@
 /**
  * CookieReject - Background Service Worker
  * Handles stats tracking, logging, whitelist/blacklist management, and storage.
+ * All data is stored in chrome.storage.local with cr_ prefixed keys.
+ * Data persists across extension reloads and updates.
  */
 
 (function () {
   'use strict';
+
+  // ─── Version ──────────────────────────────────────────────────────────
+  const APP_VERSION = '1.0.0';
 
   // ─── Constants ──────────────────────────────────────────────────────
   const STORAGE_KEYS = {
@@ -13,6 +18,7 @@
     WHITELIST: 'cr_whitelist',
     BLACKLIST: 'cr_blacklist',
     SETTINGS: 'cr_settings',
+    META: 'cr_meta',
   };
 
   const DEFAULT_STATS = {
@@ -60,15 +66,94 @@
     },
   };
 
+  // ─── Data Migration ─────────────────────────────────────────────────
+  // Ensures stored objects have all expected fields, even after an update
+  // that added new default fields. Preserves all existing user data.
+  const Migration = {
+    /**
+     * Merge a stored object with its current defaults.
+     * Adds any missing fields from defaults without overwriting existing values.
+     */
+    mergeWithDefaults(stored, defaults) {
+      if (!stored || typeof stored !== 'object') return { ...defaults };
+      let needsUpdate = false;
+      const merged = { ...defaults };
+      for (const key of Object.keys(stored)) {
+        merged[key] = stored[key];
+      }
+      // Check if any new default fields were added
+      for (const key of Object.keys(defaults)) {
+        if (!(key in stored)) {
+          needsUpdate = true;
+        }
+      }
+      return { data: merged, needsUpdate };
+    },
+
+    /**
+     * Run all migrations on startup. Safe to call on every extension load.
+     * Only writes to storage if fields were actually missing.
+     */
+    async run() {
+      let migrated = false;
+
+      // 1. Migrate stats
+      const stats = await Storage.get(STORAGE_KEYS.STATS, null);
+      if (stats) {
+        const { data, needsUpdate } = this.mergeWithDefaults(stats, DEFAULT_STATS);
+        if (needsUpdate) {
+          await Storage.set(STORAGE_KEYS.STATS, data);
+          migrated = true;
+        }
+      }
+
+      // 2. Migrate settings
+      const settings = await Storage.get(STORAGE_KEYS.SETTINGS, null);
+      if (settings) {
+        const { data, needsUpdate } = this.mergeWithDefaults(settings, DEFAULT_SETTINGS);
+        if (needsUpdate) {
+          await Storage.set(STORAGE_KEYS.SETTINGS, data);
+          migrated = true;
+        }
+      }
+
+      // 3. Ensure meta record exists (tracks last seen version)
+      const meta = await Storage.get(STORAGE_KEYS.META, null);
+      if (!meta) {
+        // First install or pre-meta version -- record current version but don't touch data
+        await Storage.set(STORAGE_KEYS.META, {
+          version: APP_VERSION,
+          firstInstallDate: (await Storage.get(STORAGE_KEYS.STATS, {})).installDate || Date.now(),
+          lastMigrationDate: Date.now(),
+        });
+        migrated = true;
+      } else if (meta.version !== APP_VERSION) {
+        // Version changed -- update meta record
+        await Storage.set(STORAGE_KEYS.META, {
+          ...meta,
+          version: APP_VERSION,
+          lastMigrationDate: Date.now(),
+        });
+        migrated = true;
+      }
+
+      if (migrated) {
+        console.log(`[CookieReject] Migration complete. Data preserved. v${APP_VERSION}`);
+      }
+    },
+  };
+
   // ─── Stats Management ───────────────────────────────────────────────
   const StatsManager = {
     async get() {
-      const stats = await Storage.get(STORAGE_KEYS.STATS, DEFAULT_STATS);
-      if (!stats.installDate) {
-        stats.installDate = Date.now();
-        await Storage.set(STORAGE_KEYS.STATS, stats);
+      // Always merge with defaults to pick up any new fields from updates
+      const stored = await Storage.get(STORAGE_KEYS.STATS, DEFAULT_STATS);
+      const { data } = Migration.mergeWithDefaults(stored, DEFAULT_STATS);
+      if (!data.installDate) {
+        data.installDate = Date.now();
+        await Storage.set(STORAGE_KEYS.STATS, data);
       }
-      return stats;
+      return data;
     },
 
     async update(updates) {
@@ -157,8 +242,8 @@
   const ListManager = {
     /**
      * Extract the base domain from a hostname.
-     * e.g. "sub.example.co.uk" → "example.co.uk"
-     *      "www.forbes.com" → "forbes.com"
+     * e.g. "sub.example.co.uk" -> "example.co.uk"
+     *      "www.forbes.com" -> "forbes.com"
      */
     extractBaseDomain(hostname) {
       if (!hostname) return '';
@@ -169,7 +254,6 @@
       const multiTLDs = ['co.uk', 'com.au', 'co.jp', 'com.br', 'co.in', 'com.mx',
         'org.uk', 'net.au', 'co.za', 'com.sg', 'co.nz', 'com.hk'];
       const lastTwo = parts.slice(-2).join('.');
-      const lastThree = parts.slice(-3).join('.');
 
       if (multiTLDs.includes(lastTwo) && parts.length > 2) {
         return parts.slice(-3).join('.');
@@ -262,7 +346,10 @@
   // ─── Settings ───────────────────────────────────────────────────────
   const SettingsManager = {
     async get() {
-      return Storage.get(STORAGE_KEYS.SETTINGS, DEFAULT_SETTINGS);
+      // Always merge with defaults to pick up any new fields from updates
+      const stored = await Storage.get(STORAGE_KEYS.SETTINGS, DEFAULT_SETTINGS);
+      const { data } = Migration.mergeWithDefaults(stored, DEFAULT_SETTINGS);
+      return data;
     },
 
     async update(updates) {
@@ -440,5 +527,6 @@
   });
 
   // ─── Initialize ─────────────────────────────────────────────────────
+  Migration.run();
   Badge.update();
 })();

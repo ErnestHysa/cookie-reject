@@ -82,6 +82,16 @@ git clone https://github.com/ErnestHysa/cookie-reject.git
 3. Select `manifest.json` from the `cookie-reject` folder
 4. Note: Firefox temporary add-ons are removed when the browser closes
 
+## Updating
+
+When you `git pull` and reload the extension, **all your data is preserved**:
+- Stats (cookies rejected, vendors unticked, time saved)
+- Activity log
+- Whitelist and Blacklist entries
+- Settings and preferences
+
+The extension runs a migration on startup that merges any new default fields with your existing stored data. Nothing is overwritten or lost.
+
 ---
 
 ## How It Looks

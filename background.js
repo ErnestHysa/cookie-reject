@@ -5,6 +5,20 @@
  * Data persists across extension reloads and updates.
  */
 
+// ─── Cross-Browser Polyfill (inlined for service worker) ────────────
+// Service workers can only load a single file in Manifest V3,
+// so the polyfill is inlined here instead of loaded separately.
+{
+  if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
+    self.chrome = browser;
+  } else if (typeof chrome !== 'undefined' && typeof browser !== 'undefined') {
+    if (!chrome.action && browser.action) chrome.action = browser.action;
+    if (!chrome.tabs && browser.tabs) chrome.tabs = browser.tabs;
+    if (!chrome.runtime && browser.runtime) chrome.runtime = browser.runtime;
+    if (!chrome.storage && browser.storage) chrome.storage = browser.storage;
+  }
+}
+
 (function () {
   'use strict';
 

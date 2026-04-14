@@ -5,7 +5,7 @@
     <strong>Because "Reject All" should mean you click it once. Not 942 times.</strong>
   </p>
   <p align="center">
-    <img src="https://img.shields.io/badge/platform-Safari%20%7C%20Chrome%20%7C%20Edge%20%7C%20Firefox-blue" alt="Platforms">
+    <img src="https://img.shields.io/badge/platform-Chrome%20%7C%20Firefox%20%7C%20Edge%20%7C%20Brave%20%7C%20Opera%20%7C%20Safari-blue" alt="Platforms">
     <img src="https://img.shields.io/badge/CMP_frameworks-15%2B-green" alt="CMP Frameworks">
     <img src="https://img.shields.io/badge/zero_dependencies-yes-brightgreen" alt="No Dependencies">
     <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
@@ -29,7 +29,7 @@ That ends now.
 
 ## The Solution
 
-**CookieReject** is a browser extension that does all of this automatically:
+**CookieReject** is a cross-browser extension that does all of this automatically:
 
 1. **Detects** the cookie consent banner (supports 15+ CMP frameworks)
 2. **Rejects all cookies** -- clicks "Reject All", "Decline", or "Deny" for you
@@ -39,24 +39,70 @@ That ends now.
 6. **Removes overlays** -- kills dark backdrops and scroll locks
 7. **Shows you exactly how much time you've saved** doing this manually
 
-## Quick Start
+## Install
 
-### Chrome / Edge / Brave (1 minute)
+### Chrome
 
 ```bash
 git clone https://github.com/ErnestHysa/cookie-reject.git
 ```
 
-1. Open your browser
-2. Go to `chrome://extensions` (or `edge://extensions` for Edge)
-3. Turn on **Developer mode** (toggle in the top right)
-4. Click **"Load unpacked"**
-5. Select the cloned `cookie-reject` folder
-6. Done. Browse the web -- cookie banners are now your problem of the past.
+1. Go to `chrome://extensions`
+2. Turn on **Developer mode** (top right toggle)
+3. Click **"Load unpacked"**
+4. Select the `cookie-reject` folder
+5. Done
 
-### Safari (requires Xcode)
+### Firefox
 
-Safari extensions need a macOS app wrapper. If you have Xcode installed:
+```bash
+git clone https://github.com/ErnestHysa/cookie-reject.git
+```
+
+1. Go to `about:debugging#/runtime/this-firefox`
+2. Click **"Load Temporary Add-on"**
+3. Select `manifest.json` from the `cookie-reject` folder
+4. Note: temporary add-ons are removed when Firefox closes. For persistent install, sign the extension at [addons.mozilla.org](https://addons.mozilla.org/developers/).
+
+### Edge
+
+```bash
+git clone https://github.com/ErnestHysa/cookie-reject.git
+```
+
+1. Go to `edge://extensions`
+2. Turn on **Developer mode** (left sidebar toggle)
+3. Click **"Load unpacked"**
+4. Select the `cookie-reject` folder
+5. Done
+
+### Brave
+
+```bash
+git clone https://github.com/ErnestHysa/cookie-reject.git
+```
+
+1. Go to `brave://extensions`
+2. Turn on **Developer mode** (top right toggle)
+3. Click **"Load unpacked"**
+4. Select the `cookie-reject` folder
+5. Done
+
+### Opera
+
+```bash
+git clone https://github.com/ErnestHysa/cookie-reject.git
+```
+
+1. Go to `opera://extensions`
+2. Turn on **Developer mode** (top right toggle)
+3. Click **"Load unpacked"**
+4. Select the `cookie-reject` folder
+5. Done
+
+### Safari (macOS, requires Xcode)
+
+Safari extensions need a macOS app wrapper.
 
 ```bash
 # 1. Clone the repo
@@ -66,21 +112,10 @@ git clone https://github.com/ErnestHysa/cookie-reject.git
 xcrun safari-web-extension-converter cookie-reject
 
 # 3. Build and run
-# Xcode will open automatically. Press Cmd+R to build and run.
+# Xcode opens automatically. Press Cmd+R to build and run.
 # The app will offer to enable the Safari extension.
 # Go to Safari > Settings > Extensions and enable CookieReject.
 ```
-
-### Firefox
-
-```bash
-git clone https://github.com/ErnestHysa/cookie-reject.git
-```
-
-1. Open `about:debugging#/runtime/this-firefox`
-2. Click **"Load Temporary Add-on"**
-3. Select `manifest.json` from the `cookie-reject` folder
-4. Note: Firefox temporary add-ons are removed when the browser closes
 
 ## Updating
 
@@ -151,6 +186,7 @@ In addition to CMP-specific handlers, CookieReject also uses the **IAB Transpare
 ### Whitelist / Blacklist
 - **Whitelist**: Sites where you want to allow cookies (e.g. your banking site). Covers all subdomains.
 - **Blacklist**: Sites where you always want to force-reject. Also covers subdomains.
+- Adding to one list automatically removes from the other (transfer, not duplicate)
 - Add from the popup UI for the current site, or type a domain manually.
 
 ### Stats & Activity
@@ -214,13 +250,14 @@ Stats logged to background worker
 
 ```
 cookie-reject/
-├── manifest.json       Extension manifest (Manifest V3)
-├── content.js          Content script -- consent rejection engine (57 KB)
-├── background.js       Background worker -- stats, logging, storage
+├── manifest.json           Extension manifest (Manifest V3)
+├── browser-polyfill.js     Cross-browser API normalization (Chrome/Firefox/Safari)
+├── content.js              Content script -- consent rejection engine
+├── background.js           Background worker -- stats, logging, storage
 ├── popup/
-│   ├── popup.html      Popup UI structure
-│   ├── popup.css       Dark theme styling
-│   └── popup.js        Popup interaction logic
+│   ├── popup.html          Popup UI structure
+│   ├── popup.css           Dark theme styling
+│   └── popup.js            Popup interaction logic
 ├── icons/
 │   ├── icon-16.png
 │   ├── icon-32.png
@@ -231,23 +268,25 @@ cookie-reject/
 
 ## Technical Details
 
-- **Manifest V3** for Chrome/Edge compatibility (Safari supports V3 via converter)
-- **Zero dependencies** -- pure vanilla JavaScript, HTML, CSS
+- **Manifest V3** -- works in Chrome, Edge, Brave, Opera, Firefox 126+, Safari 15.4+
+- **Cross-browser polyfill** -- normalizes `chrome.*` and `browser.*` APIs automatically
+- **Zero external dependencies** -- pure vanilla JavaScript, HTML, CSS
 - **~47 seconds estimated** per manual cookie rejection (industry research)
 - **~2 seconds estimated** per manual vendor toggle untick
 - Vendor processing safety limit of 2,000 toggles per page
 - Activity log capped at 500 entries
-- All data stored locally via `chrome.storage.local` -- nothing leaves your machine
+- All data stored locally via extension storage API -- nothing leaves your machine
 
 ## Browser Support
 
-| Browser | Version | Install Method |
-|---------|---------|---------------|
-| Chrome | 88+ | Load unpacked |
-| Edge | 88+ | Load unpacked |
-| Brave | Latest | Load unpacked |
-| Firefox | 78+ | Temporary add-on |
-| Safari | 14+ | Requires Xcode for app wrapper |
+| Browser | Minimum Version | Install Method | Notes |
+|---------|----------------|----------------|-------|
+| Chrome | 88+ | Load unpacked | Full support |
+| Edge | 88+ | Load unpacked | Full support |
+| Brave | Latest | Load unpacked | Full support |
+| Opera | 74+ | Load unpacked | Full support |
+| Firefox | 126+ | Load temporary add-on | Manifest V3 with service worker |
+| Safari | 15.4+ | Xcode app wrapper | Via `safari-web-extension-converter` |
 
 ## Contributing
 

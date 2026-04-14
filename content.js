@@ -1,8 +1,15 @@
 /**
  * CookieReject - Content Script
- * Auto-detects and rejects cookie/consent banners across 15+ CMP frameworks.
- * Handles vendor list unticking, overlay dismissal, and consent opt-out.
+ * Consent banner detection and rejection engine.
+ * Runs on every page. Watches for cookie consent popups and auto-rejects.
  */
+
+// ─── Cross-Browser Polyfill Guard ────────────────────────────────────
+// The full polyfill is loaded via manifest content_scripts before this file.
+// This guard handles edge cases (e.g. iframes, late injection).
+if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
+  var chrome = browser;
+}
 
 (function () {
   'use strict';

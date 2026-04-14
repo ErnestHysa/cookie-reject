@@ -1081,6 +1081,9 @@
         return !!(
           document.getElementById('cmpbox') ||
           document.getElementById('cmpwrapper') ||
+          document.querySelector('.cmpbox[role="dialog"]') ||
+          document.querySelector('[class*="cmpbox"]') ||
+          window.__cmp ||
           window.cmp
         );
       },
@@ -1092,41 +1095,75 @@
         const box = document.getElementById('cmpbox');
         if (!box) return { rejected, vendorsUnticked };
 
-        // Click "Reject All" / "Only necessary"
+        // Strategy 1: Click "Go to the website" / "Reject All" / "Only necessary"
+        // ConsentManager's "Go to the website" button IS the reject (proceed with essential only)
         const rejectBtn =
-          box.querySelector('[class*="reject"], button[class*="reject"]') ||
-          Utils.findByText('reject all', box, 'button, a, span') ||
-          Utils.findByText('only necessary', box, 'button, a, span') ||
-          Utils.findByText('deny', box, 'button, a, span');
+          box.querySelector('a.cmpboxbtnsave, a.cmptxt_btn_save') ||
+          box.querySelector('a.cmpboxbtnreject') ||
+          box.querySelector('[class*="cmpboxbtn"][class*="save"]') ||
+          Utils.findByText('go to the website', box, 'a, button, span') ||
+          Utils.findByText('reject all', box, 'a, button, span') ||
+          Utils.findByText('only necessary', box, 'a, button, span') ||
+          Utils.findByText('deny', box, 'a, button, span') ||
+          Utils.findByText('do not consent', box, 'a, button, span');
         if (rejectBtn) {
           rejectBtn.click();
           rejected++;
           return { rejected, vendorsUnticked };
         }
 
-        // Open settings
+        // Strategy 2: Open settings and untick all vendor toggles
         const settingsBtn =
-          Utils.findByText('settings', box, 'button, a, span') ||
-          Utils.findByText('manage', box, 'button, a, span');
+          box.querySelector('a.cmpboxbtncustom, a.cmptxt_btn_settings') ||
+          Utils.findByText('settings', box, 'a, button, span') ||
+          Utils.findByText('manage', box, 'a, button, span') ||
+          Utils.findByText('customise', box, 'a, button, span') ||
+          Utils.findByText('customize', box, 'a, button, span');
         if (settingsBtn) {
           settingsBtn.click();
           await Utils.sleep(CONFIG.dynamicLoadDelay);
 
-          // Toggle off all
-          const toggles = document.querySelectorAll(
-            '#cmpbox input[type="checkbox"], #cmpbox input[role="switch"]'
-          );
-          for (const toggle of toggles) {
-            if (toggle.checked && !toggle.disabled) {
-              toggle.click();
-              rejected++;
+          // Navigate through each purpose tab and toggle all vendors off
+          // Tabs: c51 (Function - always on), c52 (Marketing), c54 (Measurement)
+          const tabs = box.querySelectorAll('div.cmpboxnaviitem[role="button"]');
+          for (const tab of tabs) {
+            const purpose = tab.getAttribute('data-cmp-purpose') || '';
+            // Skip "Function" / "Essential" tabs (c51) - those vendors can't be toggled
+            if (purpose === 'c51' || purpose === 'companyinfo') continue;
+
+            tab.click();
+            await Utils.sleep(CONFIG.dynamicLoadDelay);
+
+            // Click the "toggle all vendors" switch off
+            const toggleAll = box.querySelector('a[data-cmp-vendor="all"]');
+            if (toggleAll) {
+              const isChecked = toggleAll.getAttribute('aria-checked') === 'true';
+              if (isChecked) {
+                toggleAll.click();
+                vendorsUnticked += 5; // approximate
+                await Utils.sleep(100);
+              }
+            }
+
+            // Also untick individual vendor checkboxes via aria-checked
+            const vendorToggles = box.querySelectorAll('a[role="checkbox"][data-cmp-vendor]');
+            for (const toggle of vendorToggles) {
+              if (toggle.getAttribute('data-cmp-vendor') === 'all') continue;
+              const isChecked = toggle.getAttribute('aria-checked') === 'true';
+              if (isChecked) {
+                toggle.click();
+                vendorsUnticked++;
+                await Utils.sleep(30);
+              }
             }
           }
 
-          // Save
+          // Save preferences
           const saveBtn =
-            Utils.findByText('save', document.getElementById('cmpbox'), 'button, a, span') ||
-            Utils.findByText('confirm', document.getElementById('cmpbox'), 'button, a, span');
+            box.querySelector('a.cmptxt_btn_save2, a.cmpboxbtnyescustomchoices') ||
+            Utils.findByText('save the selected', box, 'a, button, span') ||
+            Utils.findByText('save', box, 'a, button, span') ||
+            Utils.findByText('confirm', box, 'a, button, span');
           if (saveBtn) {
             saveBtn.click();
             rejected++;

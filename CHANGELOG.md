@@ -2,6 +2,17 @@
 
 All notable changes to CookieReject will be documented in this file.
 
+## [1.7.0] - 2026-04-14
+
+### Fixed (HIGH)
+- #1: UniqueDomainTracker._cache not invalidated after import or reset -- stale cache silently overwrote imported domains and broke post-reset tracking. Cache now nulled in both paths.
+
+### Fixed (MEDIUM)
+- #2: ConsentManager handler double-counted vendorsUnticked -- removed the bulk count before toggleAll, individual loop is now the single source of truth for the count.
+- #3: FORCE_REJECT silently dropped during initial detection phase -- now queues via _pendingForceReject flag and auto-restarts detection when the current pass completes.
+
+Bumped version: 1.6.0 -> 1.7.0
+
 ## [1.6.0] - 2026-04-14
 
 ### Fixed (CRITICAL)

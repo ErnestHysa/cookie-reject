@@ -228,6 +228,8 @@
       await Storage.set(STORAGE_KEYS.STATS, resetStats);
       // Also clear unique domains set
       await Storage.set(STORAGE_KEYS.UNIQUE_DOMAINS, []);
+      // Invalidate UniqueDomainTracker cache so it reloads from empty storage
+      UniqueDomainTracker._cache = null;
       return resetStats;
     },
 
@@ -609,6 +611,8 @@
           }
           // Run migration after import to ensure data integrity
           await Migration.run();
+          // Invalidate UniqueDomainTracker cache so it reloads imported domains
+          UniqueDomainTracker._cache = null;
           return { success: true, keysImported: validCount };
         }).catch(e => {
           console.error('Import write failed:', e);

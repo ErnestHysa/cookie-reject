@@ -1210,14 +1210,12 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         if (toggleAll) {
           const isChecked = toggleAll.getAttribute('aria-checked') === 'true';
           if (isChecked) {
-            const checkedToggles = box.querySelectorAll('a[role="checkbox"][data-cmp-vendor]:not([data-cmp-vendor="all"])[aria-checked="true"]');
-            vendorsUnticked += checkedToggles.length;
             toggleAll.click();
             await Utils.sleep(100);
           }
         }
 
-        // Also untick individual vendor checkboxes via aria-checked
+        // Untick individual vendor checkboxes via aria-checked and count them
         const vendorToggles = box.querySelectorAll('a[role="checkbox"][data-cmp-vendor]');
         for (const toggle of vendorToggles) {
           if (toggle.getAttribute('data-cmp-vendor') === 'all') continue;
@@ -1769,6 +1767,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     _isWhitelisted: false,
     _detecting: false,
     _handling: false,
+    _pendingForceReject: false,
     settings: {
       autoReject: true,
       untickVendors: true,
@@ -1828,7 +1827,11 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     },
 
     async detectAndReject() {
-      if (this._detecting) return;
+      if (this._detecting) {
+        // Queue force-reject instead of silently dropping (Fix #3)
+        this._pendingForceReject = true;
+        return;
+      }
       this._detecting = true;
       try {
 
@@ -1947,6 +1950,14 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       // Re-entry guard cleared after observer + interval are set up
       } finally {
         this._detecting = false;
+        // Process queued force-reject after current detection pass completes
+        if (this._pendingForceReject) {
+          this._pendingForceReject = false;
+          this.processed = false;
+          this.intervalRetries = 0;
+          this.lastFailedAttempt = 0;
+          this.detectAndReject();
+        }
       }
     },
 

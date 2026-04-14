@@ -39,6 +39,22 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   // ─── Utility helpers ────────────────────────────────────────────────
   const Utils = {
     /**
+     * Check if a DOM element is actually visible to the user.
+     * Returns false if the element (or any ancestor) is hidden via
+     * display:none, visibility:hidden, opacity:0, or has zero size.
+     */
+    isVisible(el) {
+      if (!el) return false;
+      const style = getComputedStyle(el);
+      if (style.display === 'none') return false;
+      if (style.visibility === 'hidden') return false;
+      if (parseFloat(style.opacity) === 0) return false;
+      const rect = el.getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) return false;
+      return true;
+    },
+
+    /**
      * Wait for an element matching `selector` to appear in the DOM.
      */
     waitForElement(selector, timeout = 5000, root = document) {
@@ -227,7 +243,16 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
 
       for (const detector of detectors) {
         try {
-          if (detector.check()) {
+          const result = detector.check();
+          if (result) {
+            // If the check returned a DOM element, verify it's actually visible.
+            // Many CMPs leave their banner element in the DOM but hidden
+            // (display:none) after the user has already consented. Without
+            // this check, we'd "detect" and "reject" an invisible banner,
+            // incrementing the stats counter on every page load.
+            if (result instanceof HTMLElement && !Utils.isVisible(result)) {
+              continue;
+            }
             return { id: detector.id, name: detector.name };
           }
         } catch (e) { /* skip */ }
@@ -274,7 +299,8 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       ];
 
       for (const sel of bannerIndicators) {
-        if (document.querySelector(sel)) return true;
+        const el = document.querySelector(sel);
+        if (el && Utils.isVisible(el)) return true;
       }
       return false;
     },

@@ -2,6 +2,26 @@
  * CookieReject - Content Script
  * Consent banner detection and rejection engine.
  * Runs on every page. Watches for cookie consent popups and auto-rejects.
+ *
+ * ─── TABLE OF CONTENTS ───────────────────────────────────────────────
+ * Line   Section
+ * ~~~~   ~~~~~~~
+ *    7   Cross-Browser Polyfill Guard
+ *   35   Debug Logging
+ *   55   Configuration (CONFIG)
+ *   77   Utilities (Utils.isVisible, findByText, untickAllToggles, etc.)
+ *  150   TCF / USP / GPP API Helpers
+ *  200   Handler Registration (registerHandler + auto-detect/selectors)
+ *  470   CMP Detector (CMPDetector.detect, detectGeneric)
+ *  530   CMP Handlers (47 named handlers + 1 generic fallback)
+ *        - OneTrust (#530), CookieBot (#560), Didomi (#590), etc.
+ *        - Generic fallback with 18-language support (#2560)
+ * 2880   TCF API Handler
+ * 2900   Consent Manager (high-level orchestrator)
+ * 3020   Engine (init, detectAndReject, observer, retry loop)
+ * 3490   SPA Navigation Support (pushState, hashchange)
+ * 3540   Bootstrap (DOMContentLoaded)
+ * ──────────────────────────────────────────────────────────────────────
  */
 
 // ─── Cross-Browser Polyfill Guard ────────────────────────────────────
@@ -30,7 +50,36 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       delete window[key];
     }
   }
-  if (window !== window.top) return;
+  if (window !== window.top) {
+    // We're in an iframe. Run a lightweight scan for known CMP iframes
+    // (Sourcepoint, TrustArc portal, etc.) but skip full engine init.
+    const _isCMPFrame = (() => {
+      try {
+        const src = (window.frameElement?.src || window.location.href || '').toLowerCase();
+        return src.includes('sp_message') || src.includes('sourcepoint') ||
+               src.includes('trustarc') || src.includes('consentframework') ||
+               src.includes('cookiebot') || src.includes('quantcast');
+      } catch { return false; }
+    })();
+    if (!_isCMPFrame) return;
+    // In a CMP iframe -- try generic rejection after a short delay
+    const _ifrUtils = Utils;
+    setTimeout(() => {
+      try {
+        const rejectBtns = _ifrUtils.findAllByText(
+          ['reject all', 'reject', 'decline', 'refuse', 'opt out', 'do not consent',
+           'manage choices', 'manage preferences', 'customise choices'],
+          document, 'button, a'
+        );
+        if (rejectBtns.length > 0) {
+          _ifrUtils.clickFirstMatching(rejectBtns, [
+            'reject all', 'reject', 'decline', 'refuse', 'opt out', 'do not consent'
+          ]);
+        }
+      } catch (e) { /* iframe rejection failed silently */ }
+    }, 2000);
+    return;
+  }
 
   // ─── Debug Logging ──────────────────────────────────────────────────
   // Toggle via popup settings. Outputs to console when debugMode is on.
@@ -127,22 +176,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     },
 
     /**
-     * Click an element safely. Returns true if the element existed and was clicked.
-     */
-    async click(selectorOrElement, root = document) {
-      const el =
-        typeof selectorOrElement === 'string'
-          ? root.querySelector(selectorOrElement)
-          : selectorOrElement;
-      if (!el) return false;
-      if (!Utils.isVisible(el)) return false;
-      el.scrollIntoView({ block: 'center', behavior: 'instant' });
-      const dispatched = el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-      return dispatched;
-    },
-
-    /**
-     * Find a button or link by its visible text content (case-insensitive, partial match).
+     * Find a visible element by its text content.
      * Only returns elements that are actually visible on the page.
      */
     findByText(text, root = document, tag = '*') {
@@ -159,6 +193,8 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
 
     /**
      * Find all elements matching any of several text patterns.
+     * Caches the querySelectorAll result for 2 seconds to avoid repeated
+     * full-DOM scans during the same detection cycle.
      */
     findAllByText(texts, root = document, tag = '*') {
       if (!texts || texts.length === 0) return [];
@@ -166,7 +202,17 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       // Pre-lowercase all search texts for efficiency
       const lowerTexts = texts.map(t => t.toLowerCase());
       const minLen = Math.min(...lowerTexts.map(t => t.length));
-      const elements = root.querySelectorAll(tag);
+      // Cache the element list for 2 seconds to avoid repeated DOM scans
+      const cacheKey = root === document ? '_allBtns' : '_scopedBtns';
+      const now = Date.now();
+      if (!this._textCache || !this._textCache[cacheKey] || now - this._textCache[cacheKey].ts > 2000) {
+        if (!this._textCache) this._textCache = {};
+        this._textCache[cacheKey] = {
+          els: Array.from(root.querySelectorAll(tag)),
+          ts: now,
+        };
+      }
+      const elements = this._textCache[cacheKey].els;
       for (const el of elements) {
         if (!this.isVisible(el)) continue;
         const txt = (el.textContent || '').trim().toLowerCase();
@@ -179,6 +225,11 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         }
       }
       return results;
+    },
+
+    /** Clear the text search cache (call after DOM mutations) */
+    clearTextCache() {
+      this._textCache = null;
     },
 
     /**
@@ -293,56 +344,10 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       if (this._lastDetection && (now - this._lastDetectionTime < this._cacheTTL)) {
         return this._lastDetection;
       }
-      const detectors = [
-        { id: 'onetrust', name: 'OneTrust', check: () => document.getElementById('onetrust-banner-sdk') || document.getElementById('onetrust-consent-sdk') || window.OneTrust || window.OptanonActiveGroups },
-        { id: 'fides', name: 'Fides', check: () => document.getElementById('fides-banner-container') || document.getElementById('fides-banner') || document.getElementById('fides-modal') },
-        { id: 'ketch', name: 'Ketch', check: () => document.getElementById('ketch-consent-banner') || document.getElementById('ketch-banner') || window.ketchConsent },
-        { id: 'cookiebot', name: 'Cookiebot', check: () => document.getElementById('CybotCookiebotDialog') || window.Cookiebot || document.querySelector('[data-cb-id]') },
-        { id: 'didomi', name: 'Didomi', check: () => document.getElementById('didomi-popup') || document.getElementById('didomi-host') || window.Didomi },
-        { id: 'sourcepoint', name: 'Sourcepoint', check: () => document.querySelector('[id^="sp_message_iframe"]') || document.querySelector('.sp_message_container') || window._sp_ },
-        { id: 'trustarc', name: 'TrustArc', check: () => document.getElementById('truste-consent-track') || document.getElementById('trustarc-banner') || document.querySelector('.trustarc-banner') || window.truste },
-        { id: 'quantcast', name: 'Quantcast', check: () => document.querySelector('.qc-cmp2-container') || document.querySelector('[class*="qc-cmp"]') || window.__qcmp },
-        { id: 'usercentrics', name: 'Usercentrics', check: () => document.getElementById('usercentrics-root') || document.querySelector('[data-testid="uc-banner"]') || window.UC_UI },
-        { id: 'cookieyes', name: 'CookieYes', check: () => document.getElementById('cky-btn-reject') || document.querySelector('.cky-consent-bar') || document.querySelector('[data-cky-tag]') },
-        { id: 'iubenda', name: 'Iubenda', check: () => document.querySelector('.iubenda-cs-banner') || document.getElementById('iubenda-cs-banner') || window._iub },
-        { id: 'consentmanager', name: 'ConsentManager', check: () => document.getElementById('cmpbox') || document.getElementById('cmpwrapper') || document.querySelector('.cmpbox[role="dialog"]') || document.querySelector('[class*="cmpbox"]') || window.__cmp || window.cmp },
-        { id: 'sirdata', name: 'Sirdata', check: () => document.querySelector('[class*="sdrn-"]') || document.getElementById('sd-cmp') },
-        { id: 'ezcookie', name: 'Ezoic (EzCookie)', check: () => document.querySelector('[class*="ez-cookie"]') || document.getElementById('ez-cookie-dialog') },
-        { id: 'borlabs', name: 'Borlabs Cookie', check: () => document.querySelector('#BorlabsCookieBox') || window.BorlabsCookie },
-        { id: 'lgcookieslaw', name: 'LGCookiesLaw (PrestaShop)', check: () => document.getElementById('lgcookieslaw_banner') || document.querySelector('.lgcookieslaw-banner') || document.querySelector('[class*="lgcookieslaw"]') },
-        // ── v1.8.0: 31 new CMP detectors ──
-        { id: 'complianz', name: 'Complianz', check: () => document.querySelector('#cmplz-cookiebanner') || document.querySelector('.cmplz-cookiebanner') || window.cmplz },
-        { id: 'cookienotice', name: 'Cookie Notice', check: () => document.querySelector('#cookie-notice') || document.querySelector('.cookie-notice-container') || document.querySelector('#cn-notice-content') },
-        { id: 'osano', name: 'Osano', check: () => document.querySelector('.osano-cm-dialog') || window.Osano },
-        { id: 'termly', name: 'Termly', check: () => document.querySelector('#termly-consent-content') || document.querySelector('[data-testid="termly-consent"]') || window.Termly },
-        { id: 'cookieinfo', name: 'Cookie Information', check: () => document.querySelector('#coiOverlay') || document.querySelector('.coi-banner') || window.CookieInformation || window.CookieInformationConsent },
-        { id: 'realcookiebanner', name: 'Real Cookie Banner', check: () => document.querySelector('#real-cookie-banner') || document.querySelector('.real-cookie-banner') || window.realCookieBanner },
-        { id: 'moovegdpr', name: 'Moove GDPR', check: () => document.querySelector('#moove_gdpr_cookie_modal') || document.querySelector('.moove-gdpr-infobar') || document.querySelector('#moove_gdpr_cookie_info_bar') },
-        { id: 'cookieadmin', name: 'CookieAdmin', check: () => document.querySelector('#cookieadmin-banner') || document.querySelector('.cookieadmin') || document.querySelector('[id^="cookieadmin"]') },
-        { id: 'beautifulcookie', name: 'Beautiful Cookie Consent', check: () => document.querySelector('#ccc') || document.querySelector('#ccc-icon') || document.querySelector('.ccc-wrapper') },
-        { id: 'pressidium', name: 'Pressidium', check: () => document.querySelector('#pressidium-cc') || document.querySelector('.pressidium-cookie-consent') },
-        { id: 'wplpcookie', name: 'WPLP Cookie Consent', check: () => document.querySelector('.gdpr-cookie-consent') || document.querySelector('#gdpr-cookie-consent') || document.querySelector('[class*="wplp-cookie"]') },
-        { id: 'axeptio', name: 'Axeptio', check: () => document.querySelector('#axeptio_overlay') || document.querySelector('.axeptio_main') || window.axeptio },
-        { id: 'admiral', name: 'Admiral', check: () => document.querySelector('[class*="admiral"][class*="banner"]') || document.querySelector('[class*="admiral"][class*="consent"]') || window.admiral },
-        { id: 'commandersact', name: 'Commanders Act', check: () => document.querySelector('#tc-privacy-wrapper') || document.querySelector('[class*="tc-privacy"]') || window.tC },
-        { id: 'cookiefirst', name: 'CookieFirst', check: () => document.querySelector('#cookiefirst-modal') || document.querySelector('.cookiefirst') || window.cookiefirst },
-        { id: 'cookiehub', name: 'CookieHub', check: () => document.querySelector('#cookiehub-dialog') || document.querySelector('.cookiehub') || window.cookiehub },
-        { id: 'gravito', name: 'Gravito', check: () => document.querySelector('.gravito-cmp') || document.querySelector('[id*="gravito"]') || window.gravito },
-        { id: 'truendo', name: 'TRUENDO', check: () => document.querySelector('[id*="truendo"]') || document.querySelector('.truendo') || window.TRUENDO },
-        { id: 'clickio', name: 'Clickio', check: () => document.querySelector('.clickio-cookie') || document.querySelector('[id*="clickio"]') || window.Clickio },
-        { id: 'appconsent', name: 'AppConsent', check: () => document.querySelector('[class*="appconsent"]') || document.querySelector('[id*="appconsent"]') || window.AppConsent || window.SFBX },
-        { id: 'cloudflare', name: 'Cloudflare', check: () => document.querySelector('#cf-cc-banner') || document.querySelector('[class*="cf-cookie"]') || document.querySelector('#cf-consent') },
-        { id: 'securiti', name: 'Securiti', check: () => document.querySelector('[class*="securiti"][class*="consent"]') || document.querySelector('[class*="securiti"][class*="banner"]') || window.Securiti },
-        { id: 'transcend', name: 'Transcend', check: () => document.querySelector('[class*="transcend"][class*="consent"]') || document.querySelector('[class*="transcend"][class*="banner"]') || window.transcend },
-        { id: 'civic', name: 'CIVIC', check: () => document.querySelector('[class*="civic-cookie"]') || document.querySelector('[id*="civic-cookie"]') || window.CookieControl },
-        { id: 'fastcmp', name: 'FastCMP', check: () => document.querySelector('[id*="fastcmp"]') || document.querySelector('[class*="fastcmp"]') || window.FastCMP },
-        { id: 'lawwwing', name: 'Lawwwing', check: () => document.querySelector('[class*="lawwwing"]') || document.querySelector('[id*="lawwwing"]') || window.Lawwwing },
-        { id: 'avacy', name: 'AVACY', check: () => document.querySelector('[class*="avacy"]') || document.querySelector('[id*="avacy"]') || window.AvacyCMP },
-        { id: 'consentmo', name: 'Consentmo', check: () => document.querySelector('#cookie-consent-banner.consentmo') || document.querySelector('#cookie-consent-banner[data-consentmo]') || document.querySelector('[class*="consentmo"]') || document.querySelector('[id*="consentmo"]') },
-        { id: 'pandectes', name: 'Pandectes', check: () => document.querySelector('[class*="pandectes"]') || document.querySelector('[id*="pandectes"]') || window.Pandectes },
-        { id: 'enzuzo', name: 'Enzuzo', check: () => document.querySelector('[class*="enzuzo"]') || document.querySelector('[id*="enzuzo"]') || window.Enzuzo },
-        { id: 'cookiescript', name: 'Cookie Script', check: () => document.querySelector('#cookiescript_injected') || document.querySelector('[class*="cookiescript"]') },
-      ];
+      // Use auto-registered detectors from registerHandler() calls.
+      // If none registered (shouldn't happen), fall back to empty array.
+      const detectors = _detectorEntries;
+
 
       for (const detector of detectors) {
         try {
@@ -419,10 +424,10 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         '[id*="CookiePolicy"]',
         '[class*="cookie-overlay"]',
         '[class*="cookie-policy"]',
-        // CCPA / Do Not Sell banners
-        '[class*="do-not-sell"]', '[id*="do-not-sell"]',
-        '[class*="ccpa"]', '[id*="ccpa"]',
-        '[class*="opt-out-banner"]', '[class*="optout"]',
+        // CCPA / Do Not Sell banners (require additional consent context)
+        '[class*="do-not-sell"][class*="banner"], [id*="do-not-sell"][class*="banner"]',
+        '[class*="ccpa"][class*="banner"], [class*="ccpa"][class*="notice"]',
+        '[class*="opt-out-banner"]',
         // Third-party hosted banners
         '[class*="cookieconsent"]', '[id*="cookieconsent"]',
         '[class*="cookie-law"]', '[id*="cookie-law"]',
@@ -436,11 +441,13 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       }
 
       // Also check inside Shadow DOMs (cache known hosts)
+      // Use TreeWalker for better performance than querySelectorAll('*')
       if (!this._shadowHosts || Date.now() - this._shadowHostsTimestamp > 5000) {
         this._shadowHosts = [];
-        const all = document.querySelectorAll('*');
-        for (const el of all) {
-          if (el.shadowRoot) this._shadowHosts.push(el);
+        const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_ELEMENT);
+        let node;
+        while ((node = walker.nextNode())) {
+          if (node.shadowRoot) this._shadowHosts.push(node);
         }
         this._shadowHostsTimestamp = Date.now();
       }
@@ -471,7 +478,27 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
 
   const CMPHandlers = {};
 
-  function registerHandler(id, name, detect, reject) {
+  // Auto-registered detector functions (populated by registerHandler)
+  const _detectorEntries = [];
+
+  // Auto-registered primary selectors (populated by registerHandler)
+  const _autoSelectors = {};
+
+  /**
+   * Register a CMP handler. Optionally pass selectors and a detectCheck
+   * function to auto-populate CMPDetector and _primarySelectors -- this
+   * eliminates the triple-registration problem where adding a new CMP
+   * required updating 3 separate places.
+   *
+   * @param {string} id          Unique CMP identifier
+   * @param {string} name        Human-readable CMP name
+   * @param {function} detect    Detection function (returns boolean)
+   * @param {function} reject    Rejection function (returns { rejected, vendorsUnticked })
+   * @param {object} [opts]      Optional: { selectors, detectCheck }
+   *   - selectors: CSS selector string for _primarySelectors (banner visibility checks)
+   *   - detectCheck: function for CMPDetector.detect() array (returns element/truthy)
+   */
+  function registerHandler(id, name, detect, reject, opts) {
     CMPHandlers[id] = {
       detect,
       async reject() {
@@ -483,6 +510,16 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         }
       },
     };
+    // Auto-register detector and selectors if provided
+    if (opts) {
+      if (opts.detectCheck) {
+        _detectorEntries.push({ id, name, check: opts.detectCheck });
+      }
+
+      if (opts.selectors) {
+        _autoSelectors[id] = opts.selectors;
+      }
+    }
   }
 
   // ──────────────── OneTrust ────────────────────────
@@ -529,6 +566,10 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         }
 
         // If no reject-all in PC, untick all category toggles manually
+
+
+
+
         const categorySwitches = pcSdk.querySelectorAll(
           '.category-switch-handler, input.ot-handler-toggle'
         );
@@ -582,6 +623,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     }
 
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '#onetrust-banner-sdk',
+    detectCheck: () => document.getElementById('onetrust-banner-sdk') || document.getElementById('onetrust-consent-sdk') || window.OneTrust || window.OptanonActiveGroups
   });
 
   // ──────────────── Fides (ethyca) ────────────────────────
@@ -669,6 +713,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     }
 
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '#fides-banner-container, #fides-banner',
+    detectCheck: () => document.getElementById('fides-banner-container') || document.getElementById('fides-banner') || document.getElementById('fides-modal')
   });
 
   // ──────────────── Ketch ────────────────────────
@@ -745,6 +792,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     }
 
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '#ketch-consent-banner, #ketch-banner',
+    detectCheck: () => document.getElementById('ketch-consent-banner') || document.getElementById('ketch-banner') || document.querySelector('[id*="ketch-consent"]') || typeof window.ketchConsent !== 'undefined'
   });
 
   // ──────────────── Cookiebot ────────────────────────
@@ -816,6 +866,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     }
 
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '#CybotCookiebotDialog',
+    detectCheck: () => document.getElementById('CybotCookiebotDialog') || window.Cookiebot || document.querySelector('[data-cb-id]')
   });
 
   // ──────────────── Didomi ────────────────────────
@@ -895,6 +948,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     }
 
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '#didomi-popup',
+    detectCheck: () => document.getElementById('didomi-popup') || document.getElementById('didomi-host') || window.didomi || window.Didomi
   });
 
   // ──────────────── Sourcepoint ────────────────────────
@@ -929,12 +985,26 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     // API-based: use TCF API to set consent
     if (rejected === 0 && window.__tcfapi) {
       try {
+        // Try non-standard 'rejectAll' (supported by Sourcepoint and some CMPs)
         window.__tcfapi('rejectAll', 2, () => {});
         rejected++;
-      } catch (e) { /* ignore */ }
+      } catch (e) {
+        // Fallback: standard TCF v2 approach via addEventListener + purpose denial
+        try {
+          window.__tcfapi('addEventListener', 2, (tcData, success) => {
+            if (success && tcData.eventStatus === 'tcloaded') {
+              // Remove listener and signal rejection via custom purpose consent
+              window.__tcfapi('removeEventListener', 2, () => {}, tcData.listenerId);
+            }
+          });
+        } catch (e2) { /* ignore */ }
+      }
     }
 
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '.sp_message_container, [class*="sp_veil"]',
+    detectCheck: () => document.querySelector('[id^="sp_message_iframe"]') || document.querySelector('.sp_message_container') || window._sp_
   });
 
   // ──────────────── TrustArc ────────────────────────
@@ -979,6 +1049,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         const toggles = document.querySelectorAll(
           '#truste-consent-track input[type="checkbox"], #truste-consent-track input[role="switch"]'
         );
+
         for (const toggle of toggles) {
           if (toggle.checked && !toggle.disabled) {
             toggle.click();
@@ -1000,12 +1071,18 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
 
     return { rejected, vendorsUnticked };
 
+  }, {
+    selectors: '#truste-consent-track, .trustarc-banner',
+    detectCheck: () => document.getElementById('truste-consent-track') || document.querySelector('.trustarc-banner') || window.truste
   });
 
   // ──────────────── Quantcast ────────────────────────
   registerHandler('quantcast', 'Quantcast', function detect() {
+
     return !!(
+
       document.querySelector('.qc-cmp2-container') ||
+
       document.querySelector('[class*="qc-cmp"]') ||
       window.__qcmp
     );
@@ -1028,6 +1105,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     }
 
     // Strategy 2: Open preferences
+
     const prefsBtn =
       Utils.findByText('manage', container, 'button, span') ||
       Utils.findByText('preferences', container, 'button, span') ||
@@ -1059,6 +1137,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     }
 
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '.qc-cmp2-container',
+    detectCheck: () => document.querySelector('.qc-cmp2-container') || window.__qc
   });
 
   // ──────────────── Usercentrics ────────────────────────
@@ -1073,8 +1154,18 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     let rejected = 0;
     let vendorsUnticked = 0;
 
+    // Preferred path: use UC_UI API (works regardless of shadow root mode)
+    if (window.UC_UI) {
+      try {
+        window.UC_UI.rejectAll();
+        rejected++;
+        return { rejected, vendorsUnticked };
+      } catch (e) { /* API not available, fall through to DOM */ }
+    }
+
+    // Fallback: try DOM access (only works with open shadow root)
     const root = document.getElementById('usercentrics-root');
-    const container = root ? root.shadowRoot : document;
+    const container = (root && root.shadowRoot) ? root.shadowRoot : document;
 
     // Click "Deny All" / "Reject All"
     const denyBtn =
@@ -1120,15 +1211,10 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       }
     }
 
-    // Fallback: use UC_UI API
-    if (rejected === 0 && window.UC_UI) {
-      try {
-        window.UC_UI.rejectAll();
-        rejected++;
-      } catch (e) { /* ignore */ }
-    }
-
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '#usercentrics-root',
+    detectCheck: () => document.getElementById('usercentrics-root') || window.UC_UI
   });
 
   // ──────────────── CookieYes ────────────────────────
@@ -1185,6 +1271,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     }
 
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '#ckyBanner, .cky-banner',
+    detectCheck: () => document.getElementById('ckyBanner') || document.querySelector('.cky-banner') || window.CkyConsent
   });
 
   // ──────────────── Iubenda ────────────────────────
@@ -1214,6 +1303,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     }
 
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '#iubenda-cs-banner, .iubenda-cs-banner',
+    detectCheck: () => document.getElementById('iubenda-cs-banner') || document.querySelector('.iubenda-cs-banner') || window._iub
   });
 
   // ──────────────── ConsentManager ────────────────────────
@@ -1333,6 +1425,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     }
 
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '#sd-cmp-dialog',
+    detectCheck: () => document.querySelector('#sd-cmp-dialog') || document.querySelector('.sd-cmp') || window.SDDAN
   });
 
   // ──────────────── Ezoic ────────────────────────
@@ -1359,6 +1454,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     }
 
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '#ez-cookie-dialog, .ez-cookie-dialog',
+    detectCheck: () => document.querySelector('#ez-cookie-dialog') || document.querySelector('.ez-cookie-dialog') || window.ezCMP
   });
 
   // ──────────────── Borlabs Cookie ────────────────────────
@@ -1413,6 +1511,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     }
 
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '#BorlabsCookieBox',
+    detectCheck: () => document.getElementById('BorlabsCookieBox') || window.BorlabsCookie
   });
 
   // ──────────────── LGCookiesLaw (PrestaShop) ────────────────────────
@@ -1477,8 +1578,11 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   // ──────────────── Complianz ────────────────────────
   registerHandler('complianz', 'Complianz', function detect() {
     return !!(
+
+
       document.querySelector('#cmplz-cookiebanner') ||
       document.querySelector('.cmplz-cookiebanner') ||
+
       typeof window.cmplz !== 'undefined'
     );
   }, async function reject() {
@@ -1490,6 +1594,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
 
     // Try direct reject button
     const rejectBtn =
+
       banner.querySelector('.cmplz-reject') ||
       banner.querySelector('.cmplz-btn-reject') ||
       banner.querySelector('[class*="reject"]') ||
@@ -1521,10 +1626,14 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     }
 
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '#cmplz-cookiebanner, .cmplz-cookiebanner',
+    detectCheck: () => document.querySelector('#cmplz-cookiebanner') || document.querySelector('.cmplz-cookiebanner') || window.cmplz
   });
 
   // ──────────────── Cookie Notice (Humanityco) ────────────────────────
   registerHandler('cookienotice', 'Cookie Notice', function detect() {
+
     return !!(
       document.querySelector('#cookie-notice') ||
       document.querySelector('.cookie-notice-container') ||
@@ -1549,6 +1658,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       rejected++;
     }
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '#cookie-notice, .cookie-notice-container',
+    detectCheck: () => document.querySelector('#cookie-notice') || document.querySelector('.cookie-notice-container') || document.querySelector('#cn-notice-content')
   });
 
   // ──────────────── Osano ────────────────────────
@@ -1574,6 +1686,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       rejected++;
     }
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '.osano-cm-dialog',
+    detectCheck: () => document.querySelector('.osano-cm-dialog') || window.Osano
   });
 
   // ──────────────── Termly ────────────────────────
@@ -1601,6 +1716,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       rejected++;
     }
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '#termly-consent-content, [data-testid="termly-consent"]',
+    detectCheck: () => document.querySelector('#termly-consent-content') || document.querySelector('[data-testid="termly-consent"]') || window.Termly
   });
 
   // ──────────────── Cookie Information ────────────────────────
@@ -1629,6 +1747,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       rejected++;
     }
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '#coiOverlay, .coi-banner',
+    detectCheck: () => document.querySelector('#coiOverlay') || document.querySelector('.coi-banner') || window.CookieInformation || window.CookieInformationConsent
   });
 
   // ──────────────── Real Cookie Banner ────────────────────────
@@ -1656,6 +1777,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       rejected++;
     }
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '#real-cookie-banner, .real-cookie-banner',
+    detectCheck: () => document.querySelector('#real-cookie-banner') || document.querySelector('.real-cookie-banner') || window.realCookieBanner
   });
 
   // ──────────────── Moove GDPR ────────────────────────
@@ -1716,6 +1840,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       }
     }
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '#moove_gdpr_cookie_modal, .moove-gdpr-infobar',
+    detectCheck: () => document.querySelector('#moove_gdpr_cookie_modal') || document.querySelector('.moove-gdpr-infobar') || document.querySelector('#moove_gdpr_cookie_info_bar')
   });
 
   // ──────────────── CookieAdmin ────────────────────────
@@ -1744,12 +1871,16 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       rejected++;
     }
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '#cookieadmin-banner, .cookieadmin',
+    detectCheck: () => document.querySelector('#cookieadmin-banner') || document.querySelector('.cookieadmin') || document.querySelector('[id^="cookieadmin"]')
   });
 
   // ──────────────── Beautiful Cookie Consent ────────────────────────
   registerHandler('beautifulcookie', 'Beautiful Cookie Consent', function detect() {
+    const el = document.querySelector('#ccc');
+    if (el && (el.querySelector('.ccc-wrapper') || el.className.includes('ccc') || el.querySelector('[class*="cookie"]') || el.querySelector('button'))) return true;
     return !!(
-      document.querySelector('#ccc') ||
       document.querySelector('#ccc-icon') ||
       document.querySelector('.ccc-wrapper')
     );
@@ -1791,6 +1922,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       }
 
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '#ccc-icon, .ccc-wrapper',
+    detectCheck: () => { const el = document.querySelector('#ccc'); if (el && (el.querySelector('.ccc-wrapper') || el.className.includes('ccc') || el.querySelector('[class*="cookie"]') || el.querySelector('button'))) return el; return document.querySelector('#ccc-icon') || document.querySelector('.ccc-wrapper'); }
   });
 
   // ──────────────── Pressidium Cookie Consent ────────────────────────
@@ -1816,6 +1950,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       rejected++;
     }
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '#pressidium-cc, .pressidium-cookie-consent',
+    detectCheck: () => document.querySelector('#pressidium-cc') || document.querySelector('.pressidium-cookie-consent')
   });
 
   // ──────────────── WPLP Cookie Consent ────────────────────────
@@ -1841,6 +1978,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       rejected++;
     }
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '.gdpr-cookie-consent, #gdpr-cookie-consent',
+    detectCheck: () => document.querySelector('.gdpr-cookie-consent') || document.querySelector('#gdpr-cookie-consent') || document.querySelector('[class*="wplp-cookie"]')
   });
 
   // ──────────────── Axeptio ────────────────────────
@@ -1870,14 +2010,18 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       rejected++;
     }
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '#axeptio_overlay, .axeptio_main',
+    detectCheck: () => document.querySelector('#axeptio_overlay') || document.querySelector('.axeptio_main') || window.axeptio
   });
 
   // ──────────────── Admiral ────────────────────────
   registerHandler('admiral', 'Admiral', function detect() {
     return !!(
-      document.querySelector('[class*="admiral"]') ||
-      document.querySelector('[id*="admiral"]') ||
-      typeof window.admiral !== 'undefined'
+      document.querySelector('[class*="admiral"][class*="banner"]') ||
+      document.querySelector('[class*="admiral"][class*="consent"]') ||
+      document.querySelector('[class*="admiral"][class*="privacy"]') ||
+      (typeof window.admiral !== 'undefined' && document.querySelector('[class*="admiral"], [id*="admiral"]'))
     );
   }, async function reject() {
     let rejected = 0;
@@ -1897,6 +2041,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       rejected++;
     }
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '[class*="admiral"][class*="banner"], [class*="admiral"][class*="consent"]',
+    detectCheck: () => document.querySelector('[class*="admiral"][class*="banner"]') || document.querySelector('[class*="admiral"][class*="consent"]') || document.querySelector('[class*="admiral"][class*="privacy"]') || (window.admiral && document.querySelector('[class*="admiral"], [id*="admiral"]'))
   });
 
   // ──────────────── Commanders Act ────────────────────────
@@ -1923,6 +2070,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       rejected++;
     }
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '#tc-privacy-wrapper, [class*="tc-privacy"]',
+    detectCheck: () => document.querySelector('#tc-privacy-wrapper') || document.querySelector('[class*="tc-privacy"]') || window.tC
   });
 
   // ──────────────── CookieFirst ────────────────────────
@@ -1930,9 +2080,11 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     return !!(
       document.querySelector('#cookiefirst-modal') ||
       document.querySelector('.cookiefirst') ||
+
       typeof window.cookiefirst !== 'undefined'
     );
   }, async function reject() {
+
     let rejected = 0;
     let vendorsUnticked = 0;
     const modal = document.querySelector('#cookiefirst-modal') ||
@@ -1945,10 +2097,14 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       Utils.findByText('reject', modal, 'button, a') ||
       Utils.findByText('necessary only', modal, 'button, a');
     if (rejectBtn) {
+
       rejectBtn.click();
       rejected++;
     }
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '#cookiefirst-modal, .cookiefirst',
+    detectCheck: () => document.querySelector('#cookiefirst-modal') || document.querySelector('.cookiefirst') || window.cookiefirst
   });
 
   // ──────────────── CookieHub ────────────────────────
@@ -1975,7 +2131,11 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       rejectBtn.click();
       rejected++;
     }
+
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '#cookiehub-dialog, .cookiehub',
+    detectCheck: () => document.querySelector('#cookiehub-dialog') || document.querySelector('.cookiehub') || window.cookiehub
   });
 
   // ──────────────── Gravito ────────────────────────
@@ -2002,6 +2162,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       rejected++;
     }
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '.gravito-cmp, [id*="gravito"]',
+    detectCheck: () => document.querySelector('.gravito-cmp') || document.querySelector('[id*="gravito"]') || window.gravito
   });
 
   // ──────────────── TRUENDO ────────────────────────
@@ -2022,6 +2185,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       banner.querySelector('[class*="reject"]') ||
       Utils.findByText('reject all', banner, 'button, a') ||
 
+
       Utils.findByText('reject', banner, 'button, a') ||
       Utils.findByText('necessary only', banner, 'button, a');
     if (rejectBtn) {
@@ -2029,6 +2193,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       rejected++;
     }
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '[id*="truendo"], .truendo',
+    detectCheck: () => document.querySelector('[id*="truendo"]') || document.querySelector('.truendo') || window.TRUENDO
   });
 
   // ──────────────── Clickio ────────────────────────
@@ -2054,6 +2221,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       rejected++;
     }
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '.clickio-cookie, [id*="clickio"]',
+    detectCheck: () => document.querySelector('.clickio-cookie') || document.querySelector('[id*="clickio"]') || window.Clickio
   });
 
   // ──────────────── AppConsent ────────────────────────
@@ -2081,6 +2251,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       rejected++;
     }
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '[class*="appconsent"], [id*="appconsent"]',
+    detectCheck: () => document.querySelector('[class*="appconsent"]') || document.querySelector('[id*="appconsent"]') || window.AppConsent || window.SFBX
   });
 
   // ──────────────── Cloudflare ────────────────────────
@@ -2107,6 +2280,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       rejected++;
     }
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '#cf-cc-banner, [class*="cf-cookie"], #cf-consent',
+    detectCheck: () => document.querySelector('#cf-cc-banner') || document.querySelector('[class*="cf-cookie"]') || document.querySelector('#cf-consent')
   });
 
   // ──────────────── Securiti ────────────────────────
@@ -2134,6 +2310,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       rejected++;
     }
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '[class*="securiti"][class*="consent"], [class*="securiti"][class*="banner"]',
+    detectCheck: () => document.querySelector('[class*="securiti"][class*="consent"]') || document.querySelector('[class*="securiti"][class*="banner"]') || window.Securiti
   });
 
   // ──────────────── Transcend ────────────────────────
@@ -2162,6 +2341,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       rejected++;
     }
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '[class*="transcend"][class*="consent"], [class*="transcend"][class*="banner"]',
+    detectCheck: () => document.querySelector('[class*="transcend"][class*="consent"]') || document.querySelector('[class*="transcend"][class*="banner"]') || window.transcend
   });
 
   // ──────────────── CIVIC Cookie Control ────────────────────────
@@ -2169,7 +2351,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     return !!(
       document.querySelector('[class*="civic-cookie"]') ||
       document.querySelector('[id*="civic-cookie"]') ||
-      typeof window.CookieControl !== 'undefined'
+      typeof window.CookieControl !== 'undefined' && document.querySelector('[class*="civic"], [id*="civic"]')
     );
   }, async function reject() {
     let rejected = 0;
@@ -2189,6 +2371,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       rejected++;
     }
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '[class*="civic-cookie"], [id*="civic-cookie"]',
+    detectCheck: () => document.querySelector('[class*="civic-cookie"]') || document.querySelector('[id*="civic-cookie"]') || document.querySelector('.ccc-cookie') || (window.CookieControl && document.querySelector('[class*="civic"], [id*="civic"]'))
   });
 
   // ──────────────── FastCMP ────────────────────────
@@ -2214,6 +2399,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       rejected++;
     }
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '[id*="fastcmp"], [class*="fastcmp"]',
+    detectCheck: () => document.querySelector('[id*="fastcmp"]') || document.querySelector('[class*="fastcmp"]') || window.FastCMP
   });
 
   // ──────────────── Lawwwing ────────────────────────
@@ -2240,6 +2428,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       rejected++;
     }
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '[class*="lawwwing"], [id*="lawwwing"]',
+    detectCheck: () => document.querySelector('[class*="lawwwing"]') || document.querySelector('[id*="lawwwing"]') || window.Lawwwing
   });
 
   // ──────────────── AVACY ────────────────────────
@@ -2266,6 +2457,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       rejected++;
     }
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '[class*="avacy"], [id*="avacy"]',
+    detectCheck: () => document.querySelector('[class*="avacy"]') || document.querySelector('[id*="avacy"]') || window.AvacyCMP
   });
 
   // ──────────────── Consentmo ────────────────────────
@@ -2294,6 +2488,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       rejected++;
     }
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '#cookie-consent-banner.consentmo, [class*="consentmo"]',
+    detectCheck: () => document.querySelector('#cookie-consent-banner.consentmo') || document.querySelector('#cookie-consent-banner[data-consentmo]') || document.querySelector('[class*="consentmo"]') || document.querySelector('[id*="consentmo"]')
   });
 
   // ──────────────── Pandectes ────────────────────────
@@ -2320,6 +2517,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       rejected++;
     }
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '[class*="pandectes"], [id*="pandectes"]',
+    detectCheck: () => document.querySelector('[class*="pandectes"]') || document.querySelector('[id*="pandectes"]') || window.Pandectes
   });
 
   // ──────────────── Enzuzo ────────────────────────
@@ -2346,6 +2546,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       rejected++;
     }
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '[class*="enzuzo"], [id*="enzuzo"]',
+    detectCheck: () => document.querySelector('[class*="enzuzo"]') || document.querySelector('[id*="enzuzo"]') || window.Enzuzo
   });
 
   // ──────────────── Cookie Script ────────────────────────
@@ -2371,14 +2574,19 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       rejected++;
     }
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '#cookiescript_injected, [class*="cookiescript"]',
+    detectCheck: () => document.querySelector('#cookiescript_injected') || document.querySelector('[class*="cookiescript"]')
   });
 
 
   // ──────────────── Generic (fallback) ────────────────────────
+
   registerHandler('generic', 'Generic (fallback)', function detect() {
     return CMPDetector.detectGeneric();
   }, async function reject() {
     let rejected = 0;
+
     let vendorsUnticked = 0;
 
     // Common reject button text patterns (lowercase, for matching)
@@ -2392,6 +2600,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       'do not sell my personal information', 'do not sell my info',
       'do not sell or share', 'limit the use of my data',
       'opt out of sale', 'opt out of sharing',
+
       'no vendan mi información', 'no vender mi información',
       // Third-party hosted banner patterns (cookie-script, cookielaw, etc.)
       'continue without cookies', 'block all', 'block cookies',
@@ -2475,6 +2684,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       'cookieinställningar', 'hantera cookies',
       'integritetsinställningar',
       // Danish
+
       'cookieindstillinger', 'administrer cookies',
       // Czech
       'nastavení cookies', 'spravovat cookies',
@@ -2521,6 +2731,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       'zapisz', 'potwierdź', 'zapisz preferencje',
       // Swedish
       'spara', 'bekräfta', 'spara inställningar',
+
       // Danish
       'gem', 'bekræft', 'gem indstillinger',
       // Czech
@@ -2631,6 +2842,32 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
           }
         }
 
+        // Multi-step wizard: click "Next" / "Continue" to advance through steps,
+        // unticking toggles at each step before proceeding.
+        const nextTexts = ['next', 'continue', 'weiter', 'suivant', 'siguiente', 'avanti', 'volgende'];
+        let wizardSteps = 0;
+        const maxWizardSteps = 5; // safety limit
+        while (wizardSteps < maxWizardSteps) {
+          // Untick toggles on current step
+          const modals = document.querySelectorAll(
+            '[role="dialog"], [class*="modal"], [class*="popup"], [class*="overlay"]'
+          );
+          for (const modal of modals) {
+            const result = await Utils.untickAllToggles(modal);
+            vendorsUnticked += result;
+          }
+          // Look for a "Next" button
+          let nextBtn = null;
+          for (const nText of nextTexts) {
+            nextBtn = Utils.findByText(nText, document, 'button, a');
+            if (nextBtn) break;
+          }
+          if (!nextBtn) break; // no more steps
+          nextBtn.click();
+          await Utils.sleep(CONFIG.dynamicLoadDelay);
+          wizardSteps++;
+        }
+
         // Untick all toggles
         const modals = document.querySelectorAll(
           '[role="dialog"], [class*="modal"], [class*="popup"], [class*="overlay"]'
@@ -2720,7 +2957,10 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
             });
             // Timeout after 2s if CMP doesn't respond
             setTimeout(finish, 2000);
-          });
+          }, {
+    selectors: '#lgcookieslaw_banner, .lgcookieslaw-banner, [class*="lgcookieslaw"]',
+    detectCheck: () => document.getElementById('lgcookieslaw_banner') || document.querySelector('.lgcookieslaw-banner') || document.querySelector('[class*="lgcookieslaw"]')
+  });
         } catch (e) { /* ignore */ }
       }
 
@@ -2797,55 +3037,10 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   const Engine = {
     // Shared map of primary banner selectors per CMP.
     // Used by both isCMPBannerVisible() and isBannerStillVisible().
-    _primarySelectors: {
-      onetrust: '#onetrust-banner-sdk',
-      fides: '#fides-banner-container, #fides-banner',
-      ketch: '#ketch-consent-banner, #ketch-banner',
-      cookiebot: '#CybotCookiebotDialog',
-      didomi: '#didomi-popup',
-      sourcepoint: '.sp_message_container, [class*="sp_veil"]',
-      trustarc: '#truste-consent-track, .trustarc-banner',
-      quantcast: '.qc-cmp2-container',
-      usercentrics: '#usercentrics-root',
-      cookieyes: '.cky-consent-bar',
-      iubenda: '.iubenda-cs-banner',
-      consentmanager: '#cmpbox',
-      sirdata: '#sd-cmp',
-      ezcookie: '#ez-cookie-dialog',
-      borlabs: '#BorlabsCookieBox',
-      lgcookieslaw: '#lgcookieslaw_banner',
-      // ── v1.8.0: 31 new CMP selectors ──
-      complianz: '#cmplz-cookiebanner, .cmplz-cookiebanner',
-      cookienotice: '#cookie-notice, .cookie-notice-container',
-      osano: '.osano-cm-dialog',
-      termly: '#termly-consent-content, [data-testid="termly-consent"]',
-      cookieinfo: '#coiOverlay, .coi-banner',
-      realcookiebanner: '#real-cookie-banner, .real-cookie-banner',
-      moovegdpr: '#moove_gdpr_cookie_modal, .moove-gdpr-infobar',
-      cookieadmin: '#cookieadmin-banner, .cookieadmin',
-      beautifulcookie: '#ccc, .ccc-wrapper',
-      pressidium: '#pressidium-cc, .pressidium-cookie-consent',
-      wplpcookie: '.gdpr-cookie-consent, #gdpr-cookie-consent',
-      axeptio: '#axeptio_overlay, .axeptio_main',
-      admiral: '[class*="admiral"][class*="banner"], [class*="admiral"][class*="consent"]',
-      commandersact: '#tc-privacy-wrapper, [class*="tc-privacy"]',
-      cookiefirst: '#cookiefirst-modal, .cookiefirst',
-      cookiehub: '#cookiehub-dialog, .cookiehub',
-      gravito: '.gravito-cmp, [id*="gravito"]',
-      truendo: '[id*="truendo"], .truendo',
-      clickio: '.clickio-cookie, [id*="clickio"]',
-      appconsent: '[class*="appconsent"], [id*="appconsent"]',
-      cloudflare: '#cf-cc-banner, [class*="cf-cookie"], #cf-consent',
-      securiti: '[class*="securiti"][class*="consent"], [class*="securiti"][class*="banner"]',
-      transcend: '[class*="transcend"][class*="consent"], [class*="transcend"][class*="banner"]',
-      civic: '[class*="civic-cookie"], [id*="civic-cookie"]',
-      fastcmp: '[id*="fastcmp"], [class*="fastcmp"]',
-      lawwwing: '[class*="lawwwing"], [id*="lawwwing"]',
-      avacy: '[class*="avacy"], [id*="avacy"]',
-      consentmo: '#cookie-consent-banner, [class*="consentmo"]',
-      pandectes: '[class*="pandectes"], [id*="pandectes"]',
-      enzuzo: '[class*="enzuzo"], [id*="enzuzo"]',
-      cookiescript: '#cookiescript_injected, [class*="cookiescript"]',
+    get _primarySelectors() {
+      // Merge auto-registered selectors from registerHandler() with any overrides
+      return { ..._autoSelectors };
+
     },
     initialized: false,
     intervalRetries: 0,
@@ -2859,12 +3054,14 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     _settingsLoaded: false,
     _whitelistChecked: false,
     _isWhitelisted: false,
+    _isBlacklisted: false,
     _detecting: false,
     _handling: false,
     _pendingForceReject: false,
     settings: {
       autoReject: true,
       untickVendors: true,
+
       dismissOverlays: true,
       useTCFApi: true,
       debugMode: false,
@@ -2872,6 +3069,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
 
     async init() {
       if (this.initialized) return;
+
       this.initialized = true;
 
       // Fetch full settings from background (non-blocking).
@@ -2883,8 +3081,10 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
           DebugLog.log('Settings loaded:', this.settings);
 
           // If autoReject is OFF or extension disabled, stop immediately.
-          if (!settings.enabled || !settings.autoReject) {
+          // Exception: blacklisted sites always force-run.
+          if ((!settings.enabled || !settings.autoReject) && !this._isBlacklisted) {
             this.processed = true;
+
             if (this.observerActive) {
               this.observerActive = false;
               this.observer.disconnect();
@@ -2898,7 +3098,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         this._settingsLoaded = true;
       });
 
-      // Check whitelist (non-blocking)
+      // Check whitelist/blacklist (non-blocking)
       this.sendMessage({ type: 'CHECK_LIST', domain: this.getDomain() }).then((listCheck) => {
         if (listCheck && listCheck.whitelisted) {
           this._isWhitelisted = true;
@@ -2912,6 +3112,11 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
             clearInterval(this.intervalId);
             this.intervalId = null;
           }
+        }
+        // Blacklist: force-run even if auto-reject is off
+        if (listCheck && listCheck.blacklisted) {
+          this._isBlacklisted = true;
+          DebugLog.log('Site blacklisted, forcing rejection:', this.getDomain());
         }
         this._whitelistChecked = true;
       });
@@ -2968,6 +3173,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       // Throttled to fire at most once every CONFIG.observerThrottle ms. Without this,
       // detect() runs 30+ querySelector calls + getComputedStyle on
       // every single DOM mutation -- extremely expensive during page load.
+
       this.observerActive = true;
       let lastObserverDetect = 0;
       this.observer = new MutationObserver(() => {
@@ -3013,6 +3219,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
           if (this.observerActive) {
             this.observerActive = false;
             this.observer.disconnect();
+
           }
           return;
         }
@@ -3298,7 +3505,8 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
           _debugMode = Engine.settings.debugMode;
           DebugLog.log('Settings updated live:', message.settings);
           // If extension was disabled, stop processing
-          if (!message.settings.enabled || !message.settings.autoReject) {
+          // Exception: blacklisted sites always force-run.
+          if ((!message.settings.enabled || !message.settings.autoReject) && !Engine._isBlacklisted) {
             Engine.processed = true;
             if (Engine.observerActive) {
               Engine.observerActive = false;
@@ -3309,6 +3517,51 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         sendResponse({ updated: true });
       }
     });
+  }
+
+  // ─── SPA Navigation Support ─────────────────────────────────────────
+  // Reset engine when user navigates within a single-page app.
+  // This handles History API (pushState/replaceState) and hash changes.
+  let _lastUrl = location.href;
+  function checkSpaNavigation() {
+    if (location.href !== _lastUrl) {
+      _lastUrl = location.href;
+      DebugLog.log('SPA navigation detected, resetting engine');
+      // Reset detection state but keep settings/lists
+      Engine.processed = false;
+      Engine._detecting = false;
+      Engine._handling = false;
+      Engine._detectionResult = null;
+      // Clear cache so detectors re-run
+      CMPDetector._lastDetection = null;
+      CMPDetector._lastDetectionTime = 0;
+      // Restart detection after a short delay for the new page to load
+      setTimeout(() => {
+        if (!Engine.processed && !Engine._isWhitelisted) {
+          Engine.detectAndReject();
+        }
+      }, 1500);
+    }
+  }
+
+  // Listen for popstate (back/forward) and hashchange
+  window.addEventListener('popstate', checkSpaNavigation);
+  window.addEventListener('hashchange', checkSpaNavigation);
+
+  // Monkey-patch pushState and replaceState to detect SPA-driven navigation
+  const _origPushState = history.pushState;
+  const _origReplaceState = history.replaceState;
+  if (_origPushState) {
+    history.pushState = function() {
+      _origPushState.apply(this, arguments);
+      checkSpaNavigation();
+    };
+  }
+  if (_origReplaceState) {
+    history.replaceState = function() {
+      _origReplaceState.apply(this, arguments);
+      checkSpaNavigation();
+    };
   }
 
   // ─── Start ──────────────────────────────────────────────────────────

@@ -203,6 +203,8 @@
     if (status.processed) {
       if (status.cmp) {
         updateStatus('active', `Rejected (${status.cmp.name})`);
+        // Show per-site details
+        showSiteDetails(tabInfo.domain, status.cmp.name, status.vendorsUnticked);
       } else {
         updateStatus('active', 'No banner found');
       }
@@ -224,6 +226,38 @@
     else if (state === 'warning') dot.classList.add('warning');
     else if (state === 'error') dot.classList.add('error');
     textEl.textContent = text;
+  }
+
+  function showSiteDetails(domain, cmpName, vendorsUnticked) {
+    const details = $('siteDetails');
+    if (!details) return;
+    details.style.display = 'block';
+    $('siteCMP').textContent = cmpName || '-';
+    $('siteVendors').textContent = vendorsUnticked != null ? String(vendorsUnticked) : '-';
+    // Fetch last action time from activity log
+    sendMessage({ type: 'GET_LOG_FOR_DOMAIN', domain }).then((entries) => {
+      if (entries && entries.length > 0) {
+        const last = entries[0]; // most recent
+        const ago = formatTimeAgo(last.timestamp);
+        $('siteLastAction').textContent = ago;
+      } else {
+        $('siteLastAction').textContent = 'Just now';
+      }
+    }).catch(() => {
+      $('siteLastAction').textContent = '-';
+    });
+  }
+
+  function formatTimeAgo(timestamp) {
+    if (!timestamp) return '-';
+    const seconds = Math.floor((Date.now() - timestamp) / 1000);
+    if (seconds < 60) return `${seconds}s ago`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    return `${days}d ago`;
   }
 
   // ─── Stats ─────────────────────────────────────────────────────────

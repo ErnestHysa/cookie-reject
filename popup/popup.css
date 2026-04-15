@@ -244,6 +244,29 @@ body {
   gap: 8px;
 }
 
+.site-details {
+  margin-top: 8px;
+  padding: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.site-detail-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 2px 0;
+}
+
+.site-detail-label {
+  color: var(--text-secondary);
+}
+
+.site-detail-value {
+  color: var(--text);
+  font-weight: 500;
+}
+
 /* ─── Buttons ─── */
 .btn {
   padding: 6px 14px;

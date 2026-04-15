@@ -2,6 +2,78 @@
 
 All notable changes to CookieReject will be documented in this file.
 
+## [2.0.0] - 2026-04-15
+
+### Major Changes
+- **Architecture: Single-source handler registration** -- registerHandler() now
+  auto-populates CMPDetector and _primarySelectors via opts parameter. Adding
+  a new CMP handler only requires updating ONE place instead of THREE. This
+  eliminates the class of bugs found in R9-R11 where detection fell out of sync.
+- **Cross-device sync** -- Settings, whitelist, and blacklist now sync across
+  devices via chrome.storage.sync (with local fallback for Safari/unsupported).
+- **Iframe consent banner detection** -- content.js now runs in all_frames.
+  CMP-hosting iframes (Sourcepoint, TrustArc, Cookiebot, Quantcast) get a
+  lightweight rejection scan. Major publisher coverage improved.
+- **SPA navigation support** -- Engine resets and re-scans on pushState,
+  replaceState, popstate, and hashchange events. Single-page apps no longer
+  leave the extension inert after route changes.
+- **Multi-step wizard support** -- Generic handler now advances through
+  consent wizard steps by clicking "Next"/"Continue" buttons (6 languages),
+  unticking toggles at each step, up to 5 steps.
+
+### Bug Fixes
+- **#1: Blacklist feature was completely non-functional** -- content.js only
+  checked whitelist; blacklist was returned by background.js but never acted
+  on. Blacklisted sites now force-run regardless of auto-reject setting.
+- **#2: Usercentrics closed shadow root fail** -- UC_UI.rejectAll() API is now
+  tried FIRST (works regardless of shadow root mode), DOM path is fallback.
+
+### Robustness
+- **#3: Sourcepoint iframe banners** -- Lightweight rejection for CMP iframes.
+- **#4: SPA navigation** -- Engine resets on History API changes.
+- **#5: Standard TCF v2** -- Added standard addEventListener fallback alongside
+  non-standard rejectAll call for broader CMP compatibility.
+- **#6: #ccc selector false positive** -- Beautiful Cookie Consent detector now
+  requires contextual child elements (button, cookie class, wrapper).
+- **#7: CookieControl false positive** -- CIVIC handler requires DOM context
+  alongside window.CookieControl global.
+- **#8: Admiral detector tightening** -- Requires banner/consent/privacy context
+  in class, not just "admiral" substring.
+
+### Performance
+- **#9: Shadow DOM scan** -- Replaced querySelectorAll('*') with TreeWalker
+  for 2-3x faster traversal on large DOMs.
+- **#10: findAllByText caching** -- Button/link query cached for 2 seconds to
+  avoid repeated full-DOM scans within a single detection cycle.
+- **#11: Detector array optimized** -- Replaced hardcoded 48-entry array with
+  auto-registered entries from registerHandler().
+
+### UX
+- **#12: Per-site activity view** -- Dashboard "Current Site" card now shows
+  CMP detected, vendors unticked, and last action time.
+- **#13: Time Saved metric** -- Fixed from 47s/site to realistic 8s/site.
+  Label changed to "Time Saved (est.)".
+- **#14: Per-tab icon state** -- Badge color: green = cookies rejected, gray =
+  no banner detected. Tab state cleaned up on tab close.
+
+### Gaps Addressed
+- **#15: Auto-update foundation** -- Background script checks GitHub releases
+  API daily. Ready for future remote handler rule updates.
+- **#16: Cross-device sync** -- SyncStorage layer for settings/lists.
+- **#17: Iframe banner detection** -- all_frames in manifest + CMP iframe logic.
+- **#18: Multi-step wizards** -- Next/Continue button advancement in generic.
+
+### Architecture
+- **#19: Monolith navigation** -- Added 20-line table of contents to content.js
+  header for developer orientation.
+- **#20: Triple detection consolidation** -- registerHandler() with opts
+  eliminates 3-place duplication (was root cause of R9-R11 bugs).
+- **#21: Dead code removal** -- Utils.click() (never called) removed.
+- **#23: Generic detection tightening** -- CCPA/optout selectors now require
+  compound class match (e.g. ccpa+banner) to reduce false positives.
+
+Bumped version: 1.9.0 -> 2.0.0
+
 ## [1.9.0] - 2026-04-15
 
 ### Fixed (MEDIUM)

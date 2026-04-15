@@ -40,6 +40,20 @@
           <span class="status-dot"></span>
           <span class="status-text">Checking...</span>
         </div>
+        <div class="site-details" id="siteDetails" style="display:none;">
+          <div class="site-detail-row">
+            <span class="site-detail-label">CMP Detected:</span>
+            <span class="site-detail-value" id="siteCMP">-</span>
+          </div>
+          <div class="site-detail-row">
+            <span class="site-detail-label">Vendors Unticked:</span>
+            <span class="site-detail-value" id="siteVendors">-</span>
+          </div>
+          <div class="site-detail-row">
+            <span class="site-detail-label">Last Action:</span>
+            <span class="site-detail-value" id="siteLastAction">-</span>
+          </div>
+        </div>
         <div class="site-actions">
           <button class="btn btn-primary" id="rejectNowBtn">Reject Now</button>
           <button class="btn btn-outline" id="whitelistBtn">Whitelist</button>
@@ -62,7 +76,7 @@
         </div>
         <div class="stat-card">
           <div class="stat-value" id="statTime">0s</div>
-          <div class="stat-label">Time Saved</div>
+          <div class="stat-label">Time Saved (est.)</div>
         </div>
       </div>
     </div>

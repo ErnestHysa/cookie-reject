@@ -76,7 +76,7 @@
   }
 
   async function loadDebugMode() {
-    const settings = await Storage.get(STORAGE_KEYS.SETTINGS, DEFAULT_SETTINGS);
+    const settings = await SyncStorage.get(STORAGE_KEYS.SETTINGS, DEFAULT_SETTINGS);
     debugMode = settings.debugMode || false;
   }
 
@@ -125,6 +125,57 @@
     },
   };
 
+  // ─── Sync Storage (cross-device sync for settings/lists) ────────────
+  // chrome.storage.sync has a 100KB total limit and 8KB per-item limit.
+  // Only settings, whitelist, and blacklist are synced. Stats/log stay local.
+  const SYNC_KEYS = new Set(['cr_settings', 'cr_whitelist', 'cr_blacklist']);
+
+  const SyncStorage = {
+    async get(key, defaultValue = null) {
+      return new Promise((resolve) => {
+        try {
+          // Try sync first, fall back to local
+          const store = SYNC_KEYS.has(key) ? chrome.storage.sync : chrome.storage.local;
+          store.get(key, (result) => {
+            if (chrome.runtime.lastError) {
+              // Sync not available (e.g. Safari), fall back to local
+              chrome.storage.local.get(key, (localResult) => {
+                resolve(localResult[key] !== undefined ? localResult[key] : defaultValue);
+              });
+              return;
+            }
+            resolve(result[key] !== undefined ? result[key] : defaultValue);
+          });
+        } catch {
+          resolve(defaultValue);
+        }
+      });
+    },
+
+    async set(key, value) {
+      return new Promise((resolve) => {
+        try {
+          if (SYNC_KEYS.has(key)) {
+            // Write to both sync and local for redundancy
+            chrome.storage.sync.set({ [key]: value }, () => {
+              if (chrome.runtime.lastError) {
+                // Sync quota exceeded or unavailable -- just use local
+                chrome.storage.local.set({ [key]: value }, resolve);
+                return;
+              }
+              // Also write to local as fallback
+              chrome.storage.local.set({ [key]: value }, resolve);
+            });
+          } else {
+            chrome.storage.local.set({ [key]: value }, resolve);
+          }
+        } catch {
+          chrome.storage.local.set({ [key]: value }, resolve);
+        }
+      });
+    },
+  };
+
   // ─── Data Migration ─────────────────────────────────────────────────
   const Migration = {
     mergeWithDefaults(stored, defaults) {
@@ -156,11 +207,11 @@
       }
 
       // 2. Migrate settings
-      const settings = await Storage.get(STORAGE_KEYS.SETTINGS, null);
+      const settings = await SyncStorage.get(STORAGE_KEYS.SETTINGS, null);
       if (settings) {
         const { data, needsUpdate } = this.mergeWithDefaults(settings, DEFAULT_SETTINGS);
         if (needsUpdate) {
-          await Storage.set(STORAGE_KEYS.SETTINGS, data);
+          await SyncStorage.set(STORAGE_KEYS.SETTINGS, data);
           migrated = true;
         }
       }
@@ -233,8 +284,10 @@
       return resetStats;
     },
 
+    // Estimated time saved (based on average manual interaction times).
+    // ~8 seconds per banner (find + reject), ~2 seconds per vendor toggle.
     calculateTimeSaved(stats) {
-      const siteTime = (stats.totalUniqueSites || 0) * 47;
+      const siteTime = (stats.totalUniqueSites || 0) * 8;
       const vendorTime = (stats.totalVendorsUnticked || 0) * 2;
       return siteTime + vendorTime;
     },
@@ -408,7 +461,7 @@
   // ─── Settings ───────────────────────────────────────────────────────
   const SettingsManager = {
     async get() {
-      const stored = await Storage.get(STORAGE_KEYS.SETTINGS, DEFAULT_SETTINGS);
+      const stored = await SyncStorage.get(STORAGE_KEYS.SETTINGS, DEFAULT_SETTINGS);
       const { data } = Migration.mergeWithDefaults(stored, DEFAULT_SETTINGS);
       // Sync debug mode
       debugMode = data.debugMode || false;
@@ -419,7 +472,7 @@
       return _storageQueue = _storageQueue.then(async () => {
         const settings = await this.get();
         const updated = { ...settings, ...updates };
-        await Storage.set(STORAGE_KEYS.SETTINGS, updated);
+        await SyncStorage.set(STORAGE_KEYS.SETTINGS, updated);
         // Sync debug mode
         if ('debugMode' in updates) debugMode = updates.debugMode;
         return updated;
@@ -445,6 +498,7 @@
       await this._ensureCache();
       return !this._cache.has(domain);
     },
+
 
     async add(domain) {
       return _storageQueue = _storageQueue.then(async () => {
@@ -826,6 +880,7 @@
 
   // ─── Badge Management ───────────────────────────────────────────────
   let _badgeUpdateTimer = null;
+  const _tabStates = {}; // tabId -> { rejected: bool, cmp: string }
 
   const Badge = {
     async update() {
@@ -840,6 +895,18 @@
         // Safari may not support all badge API methods
       }
     },
+
+    // Set per-tab badge color to indicate rejection status
+    async setTabState(tabId, rejected, cmp) {
+      _tabStates[tabId] = { rejected, cmp };
+      try {
+        if (rejected) {
+          chrome.action.setBadgeBackgroundColor({ color: '#4CAF50', tabId }); // green = rejected
+        } else {
+          chrome.action.setBadgeBackgroundColor({ color: '#9E9E9E', tabId }); // gray = no banner
+        }
+      } catch { /* Safari compat */ }
+    },
   };
 
   // ─── Tab Update Listener ────────────────────────────────────────────
@@ -848,6 +915,11 @@
       clearTimeout(_badgeUpdateTimer);
       _badgeUpdateTimer = setTimeout(() => Badge.update(), 500);
     }
+  });
+
+  // Clean up tab state when tabs close
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    delete _tabStates[tabId];
   });
 
   // ─── Initialize ─────────────────────────────────────────────────────
@@ -862,4 +934,42 @@
       LogManager._idCounter = log.length > 0 ? log.length : 0;
     } catch (e) { /* ignore */ }
   })();
+
+  // ─── Handler Update Checker (foundation for auto-updating rules) ───
+  // Checks GitHub releases API for new versions. In the future, this can
+  // be extended to fetch updated handler rules/selectors from a remote source.
+  const UPDATE_CHECK_INTERVAL = 24 * 60 * 60 * 1000; // 24 hours
+  const UPDATE_REPO = 'ErnestHysa/cookie-reject';
+
+  async function checkForUpdates() {
+    try {
+      const meta = await Storage.get(STORAGE_KEYS.META, {});
+      const lastCheck = meta.lastUpdateCheck || 0;
+      if (Date.now() - lastCheck < UPDATE_CHECK_INTERVAL) return;
+
+      const currentVersion = chrome.runtime.getManifest().version;
+      const response = await fetch(`https://api.github.com/repos/${UPDATE_REPO}/releases/latest`, {
+        headers: { 'Accept': 'application/vnd.github.v3+json' },
+      });
+      if (!response.ok) return;
+
+      const release = await response.json();
+      const latestVersion = release.tag_name?.replace(/^v/, '');
+      if (latestVersion && latestVersion !== currentVersion) {
+        debugLog(`Update available: ${latestVersion} (current: ${currentVersion})`);
+      }
+
+      meta.lastUpdateCheck = Date.now();
+      await Storage.set(STORAGE_KEYS.META, meta);
+    } catch (e) {
+      debugLog('Update check failed:', e.message);
+    }
+  }
+
+  // Run update check on initialization and daily via alarm
+  checkForUpdates();
+  chrome.alarms.create('checkUpdates', { periodInMinutes: 24 * 60 });
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === 'checkUpdates') checkForUpdates();
+  });
 })();

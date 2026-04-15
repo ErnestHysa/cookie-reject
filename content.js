@@ -300,7 +300,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       }
       const detectors = [
         { id: 'onetrust', name: 'OneTrust', check: () => document.getElementById('onetrust-banner-sdk') || document.getElementById('onetrust-consent-sdk') || window.OneTrust || window.OptanonActiveGroups },
-        { id: 'fides', name: 'Fides', check: () => document.getElementById('fides-banner-container') || document.getElementById('fides-banner') },
+        { id: 'fides', name: 'Fides', check: () => document.getElementById('fides-banner-container') || document.getElementById('fides-banner') || document.getElementById('fides-modal') },
         { id: 'ketch', name: 'Ketch', check: () => document.getElementById('ketch-consent-banner') || document.getElementById('ketch-banner') || window.ketchConsent },
         { id: 'cookiebot', name: 'Cookiebot', check: () => document.getElementById('CybotCookiebotDialog') || window.Cookiebot || document.querySelector('[data-cb-id]') },
         { id: 'didomi', name: 'Didomi', check: () => document.getElementById('didomi-popup') || document.getElementById('didomi-host') || window.Didomi },
@@ -310,7 +310,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         { id: 'usercentrics', name: 'Usercentrics', check: () => document.getElementById('usercentrics-root') || document.querySelector('[data-testid="uc-banner"]') || window.UC_UI },
         { id: 'cookieyes', name: 'CookieYes', check: () => document.getElementById('cky-btn-reject') || document.querySelector('.cky-consent-bar') || document.querySelector('[data-cky-tag]') },
         { id: 'iubenda', name: 'Iubenda', check: () => document.querySelector('.iubenda-cs-banner') || document.getElementById('iubenda-cs-banner') || window._iub },
-        { id: 'consentmanager', name: 'ConsentManager', check: () => document.getElementById('cmpbox') || document.getElementById('cmpwrapper') || window.cmp },
+        { id: 'consentmanager', name: 'ConsentManager', check: () => document.getElementById('cmpbox') || document.getElementById('cmpwrapper') || document.querySelector('.cmpbox[role="dialog"]') || document.querySelector('[class*="cmpbox"]') || window.__cmp || window.cmp },
         { id: 'sirdata', name: 'Sirdata', check: () => document.querySelector('[class*="sdrn-"]') || document.getElementById('sd-cmp') },
         { id: 'ezcookie', name: 'Ezoic (EzCookie)', check: () => document.querySelector('[class*="ez-cookie"]') || document.getElementById('ez-cookie-dialog') },
         { id: 'borlabs', name: 'Borlabs Cookie', check: () => document.querySelector('#BorlabsCookieBox') || window.BorlabsCookie },
@@ -343,7 +343,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         { id: 'fastcmp', name: 'FastCMP', check: () => document.querySelector('[id*="fastcmp"]') || document.querySelector('[class*="fastcmp"]') || window.FastCMP },
         { id: 'lawwwing', name: 'Lawwwing', check: () => document.querySelector('[class*="lawwwing"]') || document.querySelector('[id*="lawwwing"]') || window.Lawwwing },
         { id: 'avacy', name: 'AVACY', check: () => document.querySelector('[class*="avacy"]') || document.querySelector('[id*="avacy"]') || window.AvacyCMP },
-        { id: 'consentmo', name: 'Consentmo', check: () => document.querySelector('#cookie-consent-banner') || document.querySelector('[class*="consentmo"]') || document.querySelector('[id*="consentmo"]') },
+        { id: 'consentmo', name: 'Consentmo', check: () => document.querySelector('#cookie-consent-banner.consentmo') || document.querySelector('#cookie-consent-banner[data-consentmo]') || document.querySelector('[class*="consentmo"]') || document.querySelector('[id*="consentmo"]') },
         { id: 'pandectes', name: 'Pandectes', check: () => document.querySelector('[class*="pandectes"]') || document.querySelector('[id*="pandectes"]') || window.Pandectes },
         { id: 'enzuzo', name: 'Enzuzo', check: () => document.querySelector('[class*="enzuzo"]') || document.querySelector('[id*="enzuzo"]') || window.Enzuzo },
         { id: 'cookiescript', name: 'Cookie Script', check: () => document.querySelector('#cookiescript_injected') || document.querySelector('[class*="cookiescript"]') },
@@ -498,6 +498,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       window.OneTrust
     );
   }, async function reject() {
+
     let rejected = 0;
 
     let vendorsUnticked = 0;
@@ -999,6 +1000,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       }
     }
 
+
     return { rejected, vendorsUnticked };
 
   });
@@ -1498,6 +1500,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       Utils.findByText('weiger', banner, 'button, a');
     if (rejectBtn) {
       rejectBtn.click();
+
       rejected++;
       return { rejected, vendorsUnticked };
     }
@@ -1513,7 +1516,10 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       vendorsUnticked += unticked;
       const saveBtn = Utils.findByText('save', document, 'button, a') ||
                       Utils.findByText('opslaan', document, 'button, a');
-      if (saveBtn) saveBtn.click();
+      if (saveBtn) {
+        saveBtn.click();
+        rejected++;
+      }
     }
 
     return { rejected, vendorsUnticked };
@@ -1676,6 +1682,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         Utils.findByText('decline', infoBar, 'button, a');
       if (rejectBtn) {
         rejectBtn.click();
+        rejected++;
         return { rejected, vendorsUnticked };
       }
     }
@@ -1780,7 +1787,10 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     const unticked = await Utils.untickAllToggles(container);
     vendorsUnticked += unticked;
     const saveBtn = Utils.findByText('save', container, 'button, a');
-    if (saveBtn) saveBtn.click();
+    if (saveBtn) {
+        saveBtn.click();
+        rejected++;
+      }
 
     return { rejected, vendorsUnticked };
   });
@@ -1884,7 +1894,10 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       banner.querySelector('[class*="deny"]') ||
       Utils.findByText('reject', banner, 'button, a') ||
       Utils.findByText('decline', banner, 'button, a');
-    if (rejectBtn) rejectBtn.click();
+    if (rejectBtn) {
+      rejectBtn.click();
+      rejected++;
+    }
     return { rejected, vendorsUnticked };
   });
 
@@ -1907,7 +1920,10 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       Utils.findByText('reject all', wrapper, 'button, a') ||
       Utils.findByText('reject', wrapper, 'button, a') ||
       Utils.findByText('refuser', wrapper, 'button, a');
-    if (rejectBtn) rejectBtn.click();
+    if (rejectBtn) {
+      rejectBtn.click();
+      rejected++;
+    }
     return { rejected, vendorsUnticked };
   });
 
@@ -1930,7 +1946,10 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       Utils.findByText('reject all', modal, 'button, a') ||
       Utils.findByText('reject', modal, 'button, a') ||
       Utils.findByText('necessary only', modal, 'button, a');
-    if (rejectBtn) rejectBtn.click();
+    if (rejectBtn) {
+      rejectBtn.click();
+      rejected++;
+    }
     return { rejected, vendorsUnticked };
   });
 
@@ -1954,7 +1973,10 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       Utils.findByText('reject all', dialog, 'button, a') ||
       Utils.findByText('necessary only', dialog, 'button, a') ||
       Utils.findByText('reject', dialog, 'button, a');
-    if (rejectBtn) rejectBtn.click();
+    if (rejectBtn) {
+      rejectBtn.click();
+      rejected++;
+    }
     return { rejected, vendorsUnticked };
   });
 
@@ -1977,7 +1999,10 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       Utils.findByText('reject all', banner, 'button, a') ||
       Utils.findByText('reject', banner, 'button, a') ||
       Utils.findByText('decline', banner, 'button, a');
-    if (rejectBtn) rejectBtn.click();
+    if (rejectBtn) {
+      rejectBtn.click();
+      rejected++;
+    }
     return { rejected, vendorsUnticked };
   });
 
@@ -1998,9 +2023,13 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     const rejectBtn =
       banner.querySelector('[class*="reject"]') ||
       Utils.findByText('reject all', banner, 'button, a') ||
+
       Utils.findByText('reject', banner, 'button, a') ||
       Utils.findByText('necessary only', banner, 'button, a');
-    if (rejectBtn) rejectBtn.click();
+    if (rejectBtn) {
+      rejectBtn.click();
+      rejected++;
+    }
     return { rejected, vendorsUnticked };
   });
 
@@ -2022,7 +2051,10 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       banner.querySelector('[class*="reject"]') ||
       Utils.findByText('reject all', banner, 'button, a') ||
       Utils.findByText('reject', banner, 'button, a');
-    if (rejectBtn) rejectBtn.click();
+    if (rejectBtn) {
+      rejectBtn.click();
+      rejected++;
+    }
     return { rejected, vendorsUnticked };
   });
 
@@ -2035,7 +2067,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       typeof window.SFBX !== 'undefined'
     );
   }, async function reject() {
-
+    let rejected = 0;
     let vendorsUnticked = 0;
     const banner = document.querySelector('[class*="appconsent"]') ||
                    document.querySelector('[id*="appconsent"]');
@@ -2046,7 +2078,10 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       Utils.findByText('reject all', banner, 'button, a') ||
       Utils.findByText('refuser', banner, 'button, a') ||
       Utils.findByText('reject', banner, 'button, a');
-    if (rejectBtn) rejectBtn.click();
+    if (rejectBtn) {
+      rejectBtn.click();
+      rejected++;
+    }
     return { rejected, vendorsUnticked };
   });
 
@@ -2069,7 +2104,10 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       banner.querySelector('[class*="reject"]') ||
       Utils.findByText('reject', banner, 'button, a') ||
       Utils.findByText('decline', banner, 'button, a');
-    if (rejectBtn) rejectBtn.click();
+    if (rejectBtn) {
+      rejectBtn.click();
+      rejected++;
+    }
     return { rejected, vendorsUnticked };
   });
 
@@ -2093,7 +2131,10 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       Utils.findByText('reject all', banner, 'button, a') ||
       Utils.findByText('reject', banner, 'button, a') ||
       Utils.findByText('do not consent', banner, 'button, a');
-    if (rejectBtn) rejectBtn.click();
+    if (rejectBtn) {
+      rejectBtn.click();
+      rejected++;
+    }
     return { rejected, vendorsUnticked };
   });
 
@@ -2118,7 +2159,10 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       Utils.findByText('reject all', banner, 'button, a') ||
       Utils.findByText('reject', banner, 'button, a') ||
       Utils.findByText('opt out', banner, 'button, a');
-    if (rejectBtn) rejectBtn.click();
+    if (rejectBtn) {
+      rejectBtn.click();
+      rejected++;
+    }
     return { rejected, vendorsUnticked };
   });
 
@@ -2142,7 +2186,10 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       Utils.findByText('reject', banner, 'button, a') ||
       Utils.findByText('necessary only', banner, 'button, a') ||
       Utils.findByText('reject all', banner, 'button, a');
-    if (rejectBtn) rejectBtn.click();
+    if (rejectBtn) {
+      rejectBtn.click();
+      rejected++;
+    }
     return { rejected, vendorsUnticked };
   });
 
@@ -2164,7 +2211,10 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       banner.querySelector('[class*="reject"]') ||
       Utils.findByText('reject all', banner, 'button, a') ||
       Utils.findByText('reject', banner, 'button, a');
-    if (rejectBtn) rejectBtn.click();
+    if (rejectBtn) {
+      rejectBtn.click();
+      rejected++;
+    }
     return { rejected, vendorsUnticked };
   });
 
@@ -2187,7 +2237,10 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       Utils.findByText('rechazar', banner, 'button, a') ||
       Utils.findByText('rechazar todo', banner, 'button, a') ||
       Utils.findByText('reject', banner, 'button, a');
-    if (rejectBtn) rejectBtn.click();
+    if (rejectBtn) {
+      rejectBtn.click();
+      rejected++;
+    }
     return { rejected, vendorsUnticked };
   });
 
@@ -2210,14 +2263,18 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       Utils.findByText('rifiuta', banner, 'button, a') ||
       Utils.findByText('rifiuta tutto', banner, 'button, a') ||
       Utils.findByText('reject', banner, 'button, a');
-    if (rejectBtn) rejectBtn.click();
+    if (rejectBtn) {
+      rejectBtn.click();
+      rejected++;
+    }
     return { rejected, vendorsUnticked };
   });
 
   // ──────────────── Consentmo ────────────────────────
   registerHandler('consentmo', 'Consentmo', function detect() {
     return !!(
-      document.querySelector('#cookie-consent-banner') ||
+      document.querySelector('#cookie-consent-banner.consentmo') ||
+      document.querySelector('#cookie-consent-banner[data-consentmo]') ||
       document.querySelector('[class*="consentmo"]') ||
       document.querySelector('[id*="consentmo"]')
     );
@@ -2234,7 +2291,10 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       Utils.findByText('reject', banner, 'button, a') ||
       Utils.findByText('decline', banner, 'button, a') ||
       Utils.findByText('only necessary', banner, 'button, a');
-    if (rejectBtn) rejectBtn.click();
+    if (rejectBtn) {
+      rejectBtn.click();
+      rejected++;
+    }
     return { rejected, vendorsUnticked };
   });
 
@@ -2257,7 +2317,10 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       Utils.findByText('reject all', banner, 'button, a') ||
       Utils.findByText('reject', banner, 'button, a') ||
       Utils.findByText('necessary only', banner, 'button, a');
-    if (rejectBtn) rejectBtn.click();
+    if (rejectBtn) {
+      rejectBtn.click();
+      rejected++;
+    }
     return { rejected, vendorsUnticked };
   });
 
@@ -2280,7 +2343,10 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       Utils.findByText('reject all', banner, 'button, a') ||
       Utils.findByText('reject', banner, 'button, a') ||
       Utils.findByText('do not sell', banner, 'button, a');
-    if (rejectBtn) rejectBtn.click();
+    if (rejectBtn) {
+      rejectBtn.click();
+      rejected++;
+    }
     return { rejected, vendorsUnticked };
   });
 
@@ -2288,8 +2354,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   registerHandler('cookiescript', 'Cookie Script', function detect() {
     return !!(
       document.querySelector('#cookiescript_injected') ||
-      document.querySelector('[class*="cookiescript"]') ||
-      typeof window.cookieconsent !== 'undefined'
+      document.querySelector('[class*="cookiescript"]')
     );
   }, async function reject() {
     let rejected = 0;
@@ -2303,7 +2368,10 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       banner.querySelector('[class*="reject"]') ||
       Utils.findByText('reject', banner, 'button, a') ||
       Utils.findByText('decline', banner, 'button, a');
-    if (rejectBtn) rejectBtn.click();
+    if (rejectBtn) {
+      rejectBtn.click();
+      rejected++;
+    }
     return { rejected, vendorsUnticked };
   });
 
@@ -2498,6 +2566,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         }
       }
       if (btn) {
+
         btn.click();
         rejected++;
         return { rejected, vendorsUnticked };
@@ -2998,6 +3067,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       if (this.lastFailedAttempt && (Date.now() - this.lastFailedAttempt < CONFIG.failedCooldown)) {
         return;
       }
+
 
       const handler = CMPHandlers[cmpInfo.id];
       if (!handler) return;

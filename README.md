@@ -2,11 +2,11 @@
 
 **Auto-reject cookies, vendor consents, and privacy popups.**
 
-Cookie consent banners are everywhere. Most of them have a tiny "Reject All" button buried in a submenu, or make you untick hundreds of vendor toggles one by one. CookieReject handles all of that automatically -- detecting the banner, navigating to preferences, unticking every vendor, and saving your choice. Across 16+ CMP frameworks and in 6 languages.
+Cookie consent banners are everywhere. Most of them have a tiny "Reject All" button buried in a submenu, or make you untick hundreds of vendor toggles one by one. CookieReject handles all of that automatically -- detecting the banner, navigating to preferences, unticking every vendor, and saving your choice. Across 47+ CMP frameworks and in 18 languages.
 
 ---
 
-[![CMP Frameworks](https://img.shields.io/badge/CMP_frameworks-16%2B-green)](#supported-cmp-frameworks)
+[![CMP Frameworks](https://img.shields.io/badge/CMP_frameworks-47%2B-green)](#supported-cmp-frameworks)
 [![Browser Support](https://img.shields.io/badge/browsers-Chrome%20%7C%20Firefox%20%7C%20Edge%20%7C%20Safari-blue)](#install)
 [![License: MIT](https://img.shields.io/badge/license-MIT-brightgreen)](LICENSE)
 
@@ -66,10 +66,10 @@ Also uses IAB consent APIs (TCF v2, USP, GPP) to reject programmatically where a
 
 ## Features
 
-- **16+ CMP frameworks** with dedicated handlers
-- **Generic fallback** for unknown cookie banners
+- **47+ CMP frameworks** with dedicated handlers
+- **Generic fallback** for unknown cookie banners (18 languages)
 - **Vendor unticking** -- scrolls lazy-loaded vendor lists, clicks every toggle
-- **6 languages** -- English, German, French, Spanish, Italian, Dutch
+- **18 languages** -- EN, DE, FR, ES, IT, NL, PT, PL, CS, SV, DA, RO, HU, JA, KO, ZH, TR, RU
 - **Cross-browser** -- Chrome, Firefox, Edge, Safari (Manifest V3)
 - **Privacy-first** -- all data stored locally, no external calls
 - **Import/Export** -- backup your settings, whitelist, and stats
@@ -77,6 +77,7 @@ Also uses IAB consent APIs (TCF v2, USP, GPP) to reject programmatically where a
 - **Keyboard shortcut** -- Alt+Shift+R for manual rejection
 - **Smart verification** -- confirms banners actually disappeared after rejection
 - **Whitelist/Blacklist** -- per-site control
+- **CCPA support** -- handles "Do Not Sell" and opt-out banners
 
 ## Supported CMP Frameworks
 
@@ -98,6 +99,37 @@ Also uses IAB consent APIs (TCF v2, USP, GPP) to reject programmatically where a
 | Ezoic (EzCookie) | Yes | Yes | Yes |
 | Borlabs Cookie | Yes | Yes | Yes |
 | LGCookiesLaw (PrestaShop) | Yes | Yes | Yes |
+| Complianz | Yes | Yes | Yes |
+| Cookie Notice (Humanityco) | Yes | Yes | Yes |
+| Osano | Yes | Yes | Yes |
+| Termly | Yes | Yes | Yes |
+| Cookie Information | Yes | Yes | Yes |
+| Real Cookie Banner | Yes | Yes | Yes |
+| Moove GDPR | Yes | Yes | Yes |
+| CookieAdmin | Yes | Yes | Yes |
+| Beautiful Cookie Consent | Yes | Yes | Yes |
+| Pressidium | Yes | Yes | Yes |
+| WPLP Cookie Consent | Yes | Yes | Yes |
+| Axeptio | Yes | Yes | Yes |
+| Admiral | Yes | Yes | Yes |
+| Commanders Act | Yes | Yes | Yes |
+| CookieFirst | Yes | Yes | Yes |
+| CookieHub | Yes | Yes | Yes |
+| Gravito | Yes | Yes | Yes |
+| TRUENDO | Yes | Yes | Yes |
+| Clickio | Yes | Yes | Yes |
+| AppConsent | Yes | Yes | Yes |
+| Cloudflare | Yes | Yes | Yes |
+| Securiti | Yes | Yes | Yes |
+| Transcend | Yes | Yes | Yes |
+| CIVIC Cookie Control | Yes | Yes | Yes |
+| FastCMP | Yes | Yes | Yes |
+| Lawwwing | Yes | Yes | Yes |
+| AVACY | Yes | Yes | Yes |
+| Consentmo | Yes | Yes | Yes |
+| Pandectes | Yes | Yes | Yes |
+| Enzuzo | Yes | Yes | Yes |
+| Cookie Script | Yes | Yes | Yes |
 | **Generic fallback** | **Yes** | **Yes** | **Yes** |
 
 ## Settings
@@ -125,7 +157,10 @@ cookie-reject/
 │   ├── popup.css          # Dark theme styles
 │   └── popup.js           # Popup controller
 ├── icons/                 # Extension icons (16/32/48/128 PNG)
+├── tests/
+│   └── test-utils.js      # Unit tests for utility functions
 ├── .gitignore
+├── CHANGELOG.md           # Version history
 ├── LICENSE                # MIT
 ├── CONTRIBUTING.md        # How to contribute
 └── README.md              # This file

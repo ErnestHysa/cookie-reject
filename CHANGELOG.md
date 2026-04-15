@@ -2,6 +2,41 @@
 
 All notable changes to CookieReject will be documented in this file.
 
+## [1.8.2] - 2026-04-15
+
+### Fixed (CRITICAL)
+- #C1: AppConsent handler crashed on every invocation -- missing `let rejected = 0`
+  declaration caused ReferenceError. Handler was completely non-functional.
+- #C2: 19 of 31 new handlers clicked reject buttons but never recorded success.
+  `if (rejectBtn) rejectBtn.click();` pattern had no `rejected++`, so stats,
+  activity log, and popup status were never updated. Engine also wasted 30s
+  running detection on a page where the banner was already gone.
+
+### Fixed (HIGH)
+- #H1: Moove GDPR infobar early return -- clicked button without incrementing
+  `rejected`, so the return always reported rejected=0.
+- #H2: Complianz manage-settings path -- saveBtn.click() fired without
+  incrementing `rejected`.
+- #H3: Beautiful Cookie Consent toggle-save path -- same as H2.
+
+### Fixed (MEDIUM)
+- #M1: CookieScript handler used `window.cookieconsent` global which is shared
+  by many unrelated cookie libraries. Removed to prevent false handler
+  attribution.
+- #M2: Detection selector asymmetry -- Fides (missing #fides-modal) and
+  ConsentManager (missing .cmpbox[role="dialog"], [class*="cmpbox"],
+  window.__cmp) had fewer selectors in CMPDetector.detect() than in their
+  registerHandler() detect(). Pages using only those selectors were never
+  detected. Now aligned.
+- #M3: README updated -- 16+ -> 47+ CMP frameworks, 6 -> 18 languages,
+  added all 31 new CMPs to supported table, added CCPA feature.
+- #M4: Consentmo detector used bare `#cookie-consent-banner` which is an
+  extremely generic ID used by many CMS plugins. Tightened to
+  `#cookie-consent-banner.consentmo` and `#cookie-consent-banner[data-consentmo]`
+  to avoid false detection attribution.
+
+Bumped version: 1.8.1 -> 1.8.2
+
 ## [1.8.1] - 2026-04-15
 
 ### Fixed (HIGH)

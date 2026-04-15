@@ -2,6 +2,29 @@
 
 All notable changes to CookieReject will be documented in this file.
 
+## [1.8.1] - 2026-04-15
+
+### Fixed (HIGH)
+- #1: 31 new CMP handlers were dead code -- CMPDetector.detect() never included
+  them in its detection array. All 31 now wired up with proper check functions
+  matching their registerHandler() detection selectors.
+
+### Fixed (MEDIUM)
+- #2: All 31 new handlers omitted `rejected` from return value, breaking
+  stats/logging and retry behavior. Added `let rejected = 0`, `rejected++`
+  on button clicks, and `{ rejected, vendorsUnticked }` returns.
+
+### Fixed (LOW)
+- #3: `_primarySelectors` map missing for 31 new handlers -- banner visibility
+  checks now work correctly for all new CMPs.
+- #4: `untickAllToggles` essential-category skip used loose `includes()` matching
+  that could false-positive on "unnecessary" or vendor names containing
+  "essential". Replaced with word-boundary regex.
+- #5: Removed duplicate entries in bannerIndicators and rejectTexts.
+- #6: Popup footer updated from "16+" to "47+" CMP frameworks.
+
+Bumped version: 1.8.0 -> 1.8.1
+
 ## [1.8.0] - 2026-04-15
 
 ### Added -- 31 New CMP Handlers (16 -> 47 + generic)

@@ -192,7 +192,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
      */
     async untickAllToggles(container, opts = {}) {
       const {
-        toggleSelector = 'input[type="checkbox"], input[role="switch"], .ot-switch input, .switch input, input[class*="toggle"]',
+        toggleSelector = 'input[type="checkbox"], input[role="switch"], .ot-switch input, .switch input, input[class*="toggle"], [class*="cmp-toggle"] input, [class*="consent-toggle"] input, .cmplz-toggle input, .moove-gdpr-form input',
         excludeChecked = true, // only toggle things that ARE checked
         scrollContainer = null,
       } = opts;
@@ -216,6 +216,13 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         // Skip disabled toggles (e.g. "Strictly Necessary")
         if (toggle.disabled || toggle.hasAttribute('disabled')) continue;
 
+        // Skip toggles labeled as strictly necessary / essential
+        const label = (toggle.closest('label, [class*="category"], [class*="purpose"], tr, li') || {}).textContent || '';
+        const lowerLabel = label.toLowerCase();
+        if (lowerLabel.includes('strictly necessary') || lowerLabel.includes('essential') ||
+            lowerLabel.includes('necessary') || lowerLabel.includes('required') ||
+            lowerLabel.includes('unbedingt erforderlich') || lowerLabel.includes('indispensables')) continue;
+
         // Only untick if it's currently checked (don't re-check)
         if (excludeChecked && !toggle.checked) continue;
 
@@ -230,7 +237,10 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
 
       // Also try custom toggle switches (non-input elements)
       const customToggles = container.querySelectorAll(
-        '[class*="toggle"][role="switch"], [class*="switch"][aria-checked="true"], .ot-switch-nob, .ot-tgl-switch'
+        '[class*="toggle"][role="switch"], [class*="switch"][aria-checked="true"], .ot-switch-nob, .ot-tgl-switch, ' +
+        '[class*="cmp-toggle"][aria-checked="true"], [data-role="switch"][aria-checked="true"], ' +
+        'button[role="switch"][aria-checked="true"], a[role="switch"][aria-checked="true"], ' +
+        '[class*="legitimate-interest"][aria-checked="true"]'
       );
       for (const toggle of customToggles) {
         const ariaChecked = toggle.getAttribute('aria-checked');
@@ -351,6 +361,11 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         '[id*="gdpr-banner"]', '[id*="gdpr-notice"]',
         '[id*="privacy-banner"]', '[id*="privacy-notice"]',
         '[id*="cc-banner"]', '[id*="cc-notice"]',
+        '[id*="CookieBanner"]', '[id*="CookieNotice"]',
+        '[id*="CookieConsent"]', '[id*="ConsentBanner"]',
+        '[id*="ccpa-banner"]', '[id*="ccpa-notice"]',
+        '[id*="consent-popup"]', '[id*="banner-cookies"]',
+        '[id*="cookie-bar"]', '[id*="cookie-wrapper"]',
         // Common cookie banner classes
         '[class*="cookie-banner"]', '[class*="cookie-notice"]',
         '[class*="cookie-consent"]', '[class*="cookie-popup"]',
@@ -358,17 +373,33 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         '[class*="gdpr-banner"]', '[class*="gdpr-notice"]',
         '[class*="privacy-banner"]', '[class*="privacy-popup"]',
         '[class*="cc-banner"]', '[class*="cmp-banner"]',
+        '[class*="cookie-bar"]', '[class*="cookie-bar"]',
+        '[class*="cookie-wrapper"]', '[class*="consent-bar"]',
+        '[class*="ccpa-banner"]', '[class*="ccpa-notice"]',
+        '[class*="banner-cookies"]', '[class*="notice-cookies"]',
+        '[class*="cookie-message"]', '[class*="cookie-alert"]',
         // Role-based
         '[role="dialog"][class*="cookie"]',
         '[role="dialog"][class*="consent"]',
         '[role="dialog"][class*="privacy"]',
+        '[role="dialog"][class*="banner"]',
         // Fixed position banners (common for cookie popups)
         'div[style*="position: fixed"][class*="cookie"]',
+        'div[style*="position: fixed"][class*="consent"]',
         // Custom/proprietary cookie overlays
         '[class*="privacy-cookie"]',
         '[id*="CookiePolicy"]',
         '[class*="cookie-overlay"]',
         '[class*="cookie-policy"]',
+        // CCPA / Do Not Sell banners
+        '[class*="do-not-sell"]', '[id*="do-not-sell"]',
+        '[class*="ccpa"]', '[id*="ccpa"]',
+        '[class*="opt-out-banner"]', '[class*="optout"]',
+        // Third-party hosted banners
+        '[class*="cookieconsent"]', '[id*="cookieconsent"]',
+        '[class*="cookie-law"]', '[id*="cookie-law"]',
+        '[id*="cookie-script"]', '[class*="cookie-script"]',
+        '[id*="cookielaw"]', '[class*="cookielaworg"]',
       ];
 
       for (const sel of bannerIndicators) {
@@ -498,6 +529,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
           // Also click "Select All Vendors" toggle off if it exists
           const selectAllVendors = pcSdk.querySelector(
             '#select-all-vendor-groups-handler, .ot-select-all-vendor'
+
           );
           if (selectAllVendors) {
             const selectAllSwitch = selectAllVendors.querySelector('input');
@@ -998,6 +1030,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   // ──────────────── Usercentrics ────────────────────────
   registerHandler('usercentrics', 'Usercentrics', function detect() {
     return !!(
+
       document.getElementById('usercentrics-root') ||
       document.querySelector('[data-testid="uc-banner"]') ||
       window.UC_UI
@@ -1406,6 +1439,794 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     return { rejected, vendorsUnticked };
   });
 
+  // ──────────────── Complianz ────────────────────────
+  registerHandler('complianz', 'Complianz', function detect() {
+    return !!(
+      document.querySelector('#cmplz-cookiebanner') ||
+      document.querySelector('.cmplz-cookiebanner') ||
+      typeof window.cmplz !== 'undefined'
+    );
+  }, async function reject() {
+    let vendorsUnticked = 0;
+    const banner = document.querySelector('#cmplz-cookiebanner') ||
+                   document.querySelector('.cmplz-cookiebanner');
+    if (!banner) return { vendorsUnticked };
+
+    // Try direct reject button
+    const rejectBtn =
+      banner.querySelector('.cmplz-reject') ||
+      banner.querySelector('.cmplz-btn-reject') ||
+      banner.querySelector('[class*="reject"]') ||
+      Utils.findByText('reject', banner, 'button, a') ||
+      Utils.findByText('decline', banner, 'button, a') ||
+      Utils.findByText('weiger', banner, 'button, a');
+    if (rejectBtn) {
+      rejectBtn.click();
+      return { vendorsUnticked };
+    }
+
+    // Try manage settings -> untick toggles -> save
+    const manageBtn = Utils.findByText('manage', banner, 'button, a') ||
+                      Utils.findByText('preferences', banner, 'button, a');
+    if (manageBtn) {
+      manageBtn.click();
+      await Utils.sleep(CONFIG.dynamicLoadDelay);
+      const unticked = await Utils.untickAllToggles(document);
+      vendorsUnticked += unticked;
+      const saveBtn = Utils.findByText('save', document, 'button, a') ||
+                      Utils.findByText('opslaan', document, 'button, a');
+      if (saveBtn) saveBtn.click();
+    }
+
+    return { vendorsUnticked };
+  });
+
+  // ──────────────── Cookie Notice (Humanityco) ────────────────────────
+  registerHandler('cookienotice', 'Cookie Notice', function detect() {
+    return !!(
+      document.querySelector('#cookie-notice') ||
+      document.querySelector('.cookie-notice-container') ||
+      document.querySelector('#cn-notice-content')
+    );
+  }, async function reject() {
+    let vendorsUnticked = 0;
+    const banner = document.querySelector('#cookie-notice') ||
+                   document.querySelector('.cookie-notice-container');
+    if (!banner) return { vendorsUnticked };
+
+    const rejectBtn =
+      document.querySelector('#cn-refuse-cookie') ||
+      banner.querySelector('.cn-reject-cookie') ||
+      banner.querySelector('.cn-refuse-cookie') ||
+      Utils.findByText('reject', banner, 'button, a') ||
+      Utils.findByText('refuse', banner, 'button, a') ||
+      Utils.findByText('decline', banner, 'button, a');
+    if (rejectBtn) {
+      rejectBtn.click();
+    }
+    return { vendorsUnticked };
+  });
+
+  // ──────────────── Osano ────────────────────────
+  registerHandler('osano', 'Osano', function detect() {
+    return !!(
+      document.querySelector('.osano-cm-dialog') ||
+      typeof window.Osano !== 'undefined'
+    );
+  }, async function reject() {
+    let vendorsUnticked = 0;
+    const dialog = document.querySelector('.osano-cm-dialog');
+    if (!dialog) return { vendorsUnticked };
+
+    const rejectBtn =
+      dialog.querySelector('.osano-cm-denyAll') ||
+      dialog.querySelector('.osano-cm-deny') ||
+      dialog.querySelector('.osano-cm-close') ||
+      Utils.findByText('reject all', dialog, 'button') ||
+      Utils.findByText('deny all', dialog, 'button');
+    if (rejectBtn) {
+      rejectBtn.click();
+    }
+    return { vendorsUnticked };
+  });
+
+  // ──────────────── Termly ────────────────────────
+  registerHandler('termly', 'Termly', function detect() {
+    return !!(
+      document.querySelector('#termly-consent-content') ||
+      document.querySelector('[data-testid="termly-consent"]') ||
+      typeof window.Termly !== 'undefined'
+    );
+  }, async function reject() {
+    let vendorsUnticked = 0;
+    const container = document.querySelector('#termly-consent-content') ||
+                      document.querySelector('[data-testid="termly-consent"]') ||
+                      document.querySelector('.termly-consent');
+    if (!container) return { vendorsUnticked };
+
+    const rejectBtn =
+      container.querySelector('.termly-reject-all') ||
+      Utils.findByText('reject all', container, 'button') ||
+      Utils.findByText('reject', container, 'button') ||
+      Utils.findByText('decline', container, 'button');
+    if (rejectBtn) {
+      rejectBtn.click();
+    }
+    return { vendorsUnticked };
+  });
+
+  // ──────────────── Cookie Information ────────────────────────
+  registerHandler('cookieinfo', 'Cookie Information', function detect() {
+    return !!(
+      document.querySelector('#coiOverlay') ||
+      document.querySelector('.coi-banner') ||
+      typeof window.CookieInformation !== 'undefined' ||
+      typeof window.CookieInformationConsent !== 'undefined'
+    );
+  }, async function reject() {
+    let vendorsUnticked = 0;
+    const overlay = document.querySelector('#coiOverlay') ||
+                    document.querySelector('.coi-banner');
+    if (!overlay) return { vendorsUnticked };
+
+    const rejectBtn =
+      overlay.querySelector('.coi-banner__reject') ||
+      overlay.querySelector('.coi-reject') ||
+      Utils.findByText('reject all', overlay, 'button, a') ||
+      Utils.findByText('reject', overlay, 'button, a') ||
+      Utils.findByText('afvis alle', overlay, 'button, a');
+    if (rejectBtn) {
+      rejectBtn.click();
+    }
+    return { vendorsUnticked };
+  });
+
+  // ──────────────── Real Cookie Banner ────────────────────────
+  registerHandler('realcookiebanner', 'Real Cookie Banner', function detect() {
+    return !!(
+      document.querySelector('#real-cookie-banner') ||
+      document.querySelector('.real-cookie-banner') ||
+      typeof window.realCookieBanner !== 'undefined'
+    );
+  }, async function reject() {
+    let vendorsUnticked = 0;
+    const banner = document.querySelector('#real-cookie-banner') ||
+                   document.querySelector('.real-cookie-banner');
+    if (!banner) return { vendorsUnticked };
+
+    const rejectBtn =
+      banner.querySelector('[data-reject]') ||
+      banner.querySelector('.reject') ||
+      Utils.findByText('reject all', banner, 'button, a') ||
+      Utils.findByText('reject', banner, 'button, a') ||
+      Utils.findByText('ablehnen', banner, 'button, a');
+    if (rejectBtn) {
+      rejectBtn.click();
+    }
+    return { vendorsUnticked };
+  });
+
+  // ──────────────── Moove GDPR ────────────────────────
+  registerHandler('moovegdpr', 'Moove GDPR', function detect() {
+    return !!(
+      document.querySelector('#moove_gdpr_cookie_modal') ||
+      document.querySelector('.moove-gdpr-infobar') ||
+      document.querySelector('#moove_gdpr_cookie_info_bar')
+    );
+  }, async function reject() {
+    let vendorsUnticked = 0;
+
+    // Try reject on the info bar first
+    const infoBar = document.querySelector('#moove_gdpr_cookie_info_bar') ||
+                    document.querySelector('.moove-gdpr-infobar');
+    if (infoBar) {
+      const rejectBtn =
+        infoBar.querySelector('.moove-gdpr-infobar-reject-btn') ||
+        infoBar.querySelector('[class*="reject"]') ||
+        Utils.findByText('reject', infoBar, 'button, a') ||
+        Utils.findByText('decline', infoBar, 'button, a');
+      if (rejectBtn) {
+        rejectBtn.click();
+        return { vendorsUnticked };
+      }
+    }
+
+    // Otherwise open the modal and disable all categories
+    const modal = document.querySelector('#moove_gdpr_cookie_modal');
+    if (modal) {
+      // Open modal if not visible
+      if (!Utils.isVisible(modal)) {
+        const settingsBtn = infoBar ?
+          (infoBar.querySelector('[class*="settings"]') ||
+           Utils.findByText('settings', infoBar, 'button, a') ||
+           Utils.findByText('change', infoBar, 'button, a')) : null;
+        if (settingsBtn) settingsBtn.click();
+        await Utils.sleep(CONFIG.dynamicLoadDelay);
+      }
+
+      // Untick third-party toggles
+      const toggles = modal.querySelectorAll('.moove-gdpr-form input[type="checkbox"]:not([disabled])');
+      for (const toggle of toggles) {
+        if (toggle.checked) {
+          toggle.click();
+          vendorsUnticked++;
+        }
+      }
+
+      // Save
+      const saveBtn = modal.querySelector('.moove-gdpr-modal-save-settings') ||
+                      Utils.findByText('save', modal, 'button, a');
+      if (saveBtn) saveBtn.click();
+    }
+    return { vendorsUnticked };
+  });
+
+  // ──────────────── CookieAdmin ────────────────────────
+  registerHandler('cookieadmin', 'CookieAdmin', function detect() {
+    return !!(
+      document.querySelector('#cookieadmin-banner') ||
+      document.querySelector('.cookieadmin') ||
+      document.querySelector('[id^="cookieadmin"]')
+    );
+  }, async function reject() {
+    let vendorsUnticked = 0;
+    const banner = document.querySelector('#cookieadmin-banner') ||
+                   document.querySelector('.cookieadmin') ||
+                   document.querySelector('[id^="cookieadmin"]');
+    if (!banner) return { vendorsUnticked };
+
+    const rejectBtn =
+      banner.querySelector('[class*="reject"]') ||
+      banner.querySelector('[id*="reject"]') ||
+      Utils.findByText('reject', banner, 'button, a') ||
+      Utils.findByText('decline', banner, 'button, a') ||
+      Utils.findByText('only necessary', banner, 'button, a');
+    if (rejectBtn) {
+      rejectBtn.click();
+    }
+    return { vendorsUnticked };
+  });
+
+  // ──────────────── Beautiful Cookie Consent ────────────────────────
+  registerHandler('beautifulcookie', 'Beautiful Cookie Consent', function detect() {
+    return !!(
+      document.querySelector('#ccc') ||
+      document.querySelector('#ccc-icon') ||
+      document.querySelector('.ccc-wrapper')
+    );
+  }, async function reject() {
+    let vendorsUnticked = 0;
+
+    // Open the settings panel
+    const icon = document.querySelector('#ccc-icon') ||
+                 document.querySelector('#ccc-open');
+    if (icon) {
+      icon.click();
+      await Utils.sleep(CONFIG.dynamicLoadDelay);
+    }
+
+    const container = document.querySelector('#ccc') ||
+                      document.querySelector('.ccc-wrapper');
+    if (!container) return { vendorsUnticked };
+
+    // Try reject button
+    const rejectBtn =
+      container.querySelector('[class*="reject"]') ||
+      Utils.findByText('reject', container, 'button, a') ||
+      Utils.findByText('only necessary', container, 'button, a') ||
+      Utils.findByText('essential only', container, 'button, a');
+    if (rejectBtn) {
+      rejectBtn.click();
+      return { vendorsUnticked };
+    }
+
+    // Untick toggles and save
+    const unticked = await Utils.untickAllToggles(container);
+    vendorsUnticked += unticked;
+    const saveBtn = Utils.findByText('save', container, 'button, a');
+    if (saveBtn) saveBtn.click();
+
+    return { vendorsUnticked };
+  });
+
+  // ──────────────── Pressidium Cookie Consent ────────────────────────
+  registerHandler('pressidium', 'Pressidium', function detect() {
+    return !!(
+      document.querySelector('#pressidium-cc') ||
+      document.querySelector('.pressidium-cookie-consent')
+    );
+  }, async function reject() {
+    let vendorsUnticked = 0;
+    const banner = document.querySelector('#pressidium-cc') ||
+                   document.querySelector('.pressidium-cookie-consent');
+    if (!banner) return { vendorsUnticked };
+
+    const rejectBtn =
+      banner.querySelector('[class*="reject"]') ||
+      Utils.findByText('reject', banner, 'button, a') ||
+      Utils.findByText('necessary only', banner, 'button, a') ||
+      Utils.findByText('decline', banner, 'button, a');
+    if (rejectBtn) {
+      rejectBtn.click();
+    }
+    return { vendorsUnticked };
+  });
+
+  // ──────────────── WPLP Cookie Consent ────────────────────────
+  registerHandler('wplpcookie', 'WPLP Cookie Consent', function detect() {
+    return !!(
+      document.querySelector('.gdpr-cookie-consent') ||
+      document.querySelector('#gdpr-cookie-consent') ||
+      document.querySelector('[class*="wplp-cookie"]')
+    );
+  }, async function reject() {
+    let vendorsUnticked = 0;
+    const banner = document.querySelector('.gdpr-cookie-consent') ||
+                   document.querySelector('#gdpr-cookie-consent');
+    if (!banner) return { vendorsUnticked };
+
+    const rejectBtn =
+      banner.querySelector('[class*="reject"]') ||
+      Utils.findByText('reject', banner, 'button, a') ||
+      Utils.findByText('decline', banner, 'button, a');
+    if (rejectBtn) {
+      rejectBtn.click();
+    }
+    return { vendorsUnticked };
+  });
+
+  // ──────────────── Axeptio ────────────────────────
+  registerHandler('axeptio', 'Axeptio', function detect() {
+    return !!(
+      document.querySelector('#axeptio_overlay') ||
+      document.querySelector('.axeptio_main') ||
+      typeof window.axeptio !== 'undefined'
+    );
+  }, async function reject() {
+    let vendorsUnticked = 0;
+    const overlay = document.querySelector('#axeptio_overlay') ||
+                    document.querySelector('.axeptio_main');
+    if (!overlay) return { vendorsUnticked };
+
+    const rejectBtn =
+      overlay.querySelector('[class*="reject"]') ||
+      overlay.querySelector('[class*="deny"]') ||
+      overlay.querySelector('[class*="refuse"]') ||
+      Utils.findByText('reject all', overlay, 'button, a') ||
+      Utils.findByText('reject', overlay, 'button, a') ||
+      Utils.findByText('refuser', overlay, 'button, a') ||
+      Utils.findByText('deny', overlay, 'button, a');
+    if (rejectBtn) {
+      rejectBtn.click();
+    }
+    return { vendorsUnticked };
+  });
+
+  // ──────────────── Admiral ────────────────────────
+  registerHandler('admiral', 'Admiral', function detect() {
+    return !!(
+      document.querySelector('[class*="admiral"]') ||
+      document.querySelector('[id*="admiral"]') ||
+      typeof window.admiral !== 'undefined'
+    );
+  }, async function reject() {
+    let vendorsUnticked = 0;
+    const banner = document.querySelector('[class*="admiral"][class*="banner"]') ||
+                   document.querySelector('[class*="admiral"][class*="consent"]') ||
+                   document.querySelector('[id*="admiral"]');
+    if (!banner) return { vendorsUnticked };
+
+    const rejectBtn =
+      banner.querySelector('[class*="reject"]') ||
+      banner.querySelector('[class*="deny"]') ||
+      Utils.findByText('reject', banner, 'button, a') ||
+      Utils.findByText('decline', banner, 'button, a');
+    if (rejectBtn) rejectBtn.click();
+    return { vendorsUnticked };
+  });
+
+  // ──────────────── Commanders Act ────────────────────────
+  registerHandler('commandersact', 'Commanders Act', function detect() {
+    return !!(
+      document.querySelector('#tc-privacy-wrapper') ||
+      document.querySelector('[class*="tc-privacy"]') ||
+      typeof window.tC !== 'undefined'
+    );
+  }, async function reject() {
+    let vendorsUnticked = 0;
+    const wrapper = document.querySelector('#tc-privacy-wrapper') ||
+                    document.querySelector('[class*="tc-privacy"]');
+    if (!wrapper) return { vendorsUnticked };
+
+    const rejectBtn =
+      wrapper.querySelector('[class*="reject"]') ||
+      Utils.findByText('reject all', wrapper, 'button, a') ||
+      Utils.findByText('reject', wrapper, 'button, a') ||
+      Utils.findByText('refuser', wrapper, 'button, a');
+    if (rejectBtn) rejectBtn.click();
+    return { vendorsUnticked };
+  });
+
+  // ──────────────── CookieFirst ────────────────────────
+  registerHandler('cookiefirst', 'CookieFirst', function detect() {
+    return !!(
+      document.querySelector('#cookiefirst-modal') ||
+      document.querySelector('.cookiefirst') ||
+      typeof window.cookiefirst !== 'undefined'
+    );
+  }, async function reject() {
+    let vendorsUnticked = 0;
+    const modal = document.querySelector('#cookiefirst-modal') ||
+                  document.querySelector('.cookiefirst');
+    if (!modal) return { vendorsUnticked };
+
+    const rejectBtn =
+      modal.querySelector('[class*="reject"]') ||
+      Utils.findByText('reject all', modal, 'button, a') ||
+      Utils.findByText('reject', modal, 'button, a') ||
+      Utils.findByText('necessary only', modal, 'button, a');
+    if (rejectBtn) rejectBtn.click();
+    return { vendorsUnticked };
+  });
+
+  // ──────────────── CookieHub ────────────────────────
+  registerHandler('cookiehub', 'CookieHub', function detect() {
+    return !!(
+      document.querySelector('#cookiehub-dialog') ||
+      document.querySelector('.cookiehub') ||
+      typeof window.cookiehub !== 'undefined'
+    );
+  }, async function reject() {
+    let vendorsUnticked = 0;
+    const dialog = document.querySelector('#cookiehub-dialog') ||
+                   document.querySelector('.cookiehub');
+    if (!dialog) return { vendorsUnticked };
+
+    const rejectBtn =
+      dialog.querySelector('[class*="reject"]') ||
+      dialog.querySelector('[id*="reject"]') ||
+      Utils.findByText('reject all', dialog, 'button, a') ||
+      Utils.findByText('necessary only', dialog, 'button, a') ||
+      Utils.findByText('reject', dialog, 'button, a');
+    if (rejectBtn) rejectBtn.click();
+    return { vendorsUnticked };
+  });
+
+  // ──────────────── Gravito ────────────────────────
+  registerHandler('gravito', 'Gravito', function detect() {
+    return !!(
+      document.querySelector('.gravito-cmp') ||
+      document.querySelector('[id*="gravito"]') ||
+      typeof window.gravito !== 'undefined'
+    );
+  }, async function reject() {
+    let vendorsUnticked = 0;
+    const banner = document.querySelector('.gravito-cmp') ||
+                   document.querySelector('[id*="gravito"]');
+    if (!banner) return { vendorsUnticked };
+
+    const rejectBtn =
+      banner.querySelector('[class*="reject"]') ||
+      Utils.findByText('reject all', banner, 'button, a') ||
+      Utils.findByText('reject', banner, 'button, a') ||
+      Utils.findByText('decline', banner, 'button, a');
+    if (rejectBtn) rejectBtn.click();
+    return { vendorsUnticked };
+  });
+
+  // ──────────────── TRUENDO ────────────────────────
+  registerHandler('truendo', 'TRUENDO', function detect() {
+    return !!(
+      document.querySelector('[id*="truendo"]') ||
+      document.querySelector('.truendo') ||
+      typeof window.TRUENDO !== 'undefined'
+    );
+  }, async function reject() {
+    let vendorsUnticked = 0;
+    const banner = document.querySelector('[id*="truendo"]') ||
+                   document.querySelector('.truendo');
+    if (!banner) return { vendorsUnticked };
+
+    const rejectBtn =
+      banner.querySelector('[class*="reject"]') ||
+      Utils.findByText('reject all', banner, 'button, a') ||
+      Utils.findByText('reject', banner, 'button, a') ||
+      Utils.findByText('necessary only', banner, 'button, a');
+    if (rejectBtn) rejectBtn.click();
+    return { vendorsUnticked };
+  });
+
+  // ──────────────── Clickio ────────────────────────
+  registerHandler('clickio', 'Clickio', function detect() {
+    return !!(
+      document.querySelector('.clickio-cookie') ||
+      document.querySelector('[id*="clickio"]') ||
+      typeof window.Clickio !== 'undefined'
+    );
+  }, async function reject() {
+    let vendorsUnticked = 0;
+    const banner = document.querySelector('.clickio-cookie') ||
+                   document.querySelector('[id*="clickio"]');
+    if (!banner) return { vendorsUnticked };
+
+    const rejectBtn =
+      banner.querySelector('[class*="reject"]') ||
+      Utils.findByText('reject all', banner, 'button, a') ||
+      Utils.findByText('reject', banner, 'button, a');
+    if (rejectBtn) rejectBtn.click();
+    return { vendorsUnticked };
+  });
+
+  // ──────────────── AppConsent ────────────────────────
+  registerHandler('appconsent', 'AppConsent', function detect() {
+    return !!(
+      document.querySelector('[class*="appconsent"]') ||
+      document.querySelector('[id*="appconsent"]') ||
+      typeof window.AppConsent !== 'undefined' ||
+      typeof window.SFBX !== 'undefined'
+    );
+  }, async function reject() {
+    let vendorsUnticked = 0;
+    const banner = document.querySelector('[class*="appconsent"]') ||
+                   document.querySelector('[id*="appconsent"]');
+    if (!banner) return { vendorsUnticked };
+
+    const rejectBtn =
+      banner.querySelector('[class*="reject"]') ||
+      Utils.findByText('reject all', banner, 'button, a') ||
+      Utils.findByText('refuser', banner, 'button, a') ||
+      Utils.findByText('reject', banner, 'button, a');
+    if (rejectBtn) rejectBtn.click();
+    return { vendorsUnticked };
+  });
+
+  // ──────────────── Cloudflare ────────────────────────
+  registerHandler('cloudflare', 'Cloudflare', function detect() {
+    return !!(
+      document.querySelector('#cf-cc-banner') ||
+      document.querySelector('[class*="cf-cookie"]') ||
+      document.querySelector('#cf-consent')
+    );
+  }, async function reject() {
+    let vendorsUnticked = 0;
+    const banner = document.querySelector('#cf-cc-banner') ||
+                   document.querySelector('[class*="cf-cookie"]') ||
+                   document.querySelector('#cf-consent');
+    if (!banner) return { vendorsUnticked };
+
+    const rejectBtn =
+      banner.querySelector('[class*="reject"]') ||
+      Utils.findByText('reject', banner, 'button, a') ||
+      Utils.findByText('decline', banner, 'button, a');
+    if (rejectBtn) rejectBtn.click();
+    return { vendorsUnticked };
+  });
+
+  // ──────────────── Securiti ────────────────────────
+  registerHandler('securiti', 'Securiti', function detect() {
+    return !!(
+      document.querySelector('[class*="securiti"]') ||
+      document.querySelector('[id*="securiti"]') ||
+      typeof window.Securiti !== 'undefined'
+    );
+  }, async function reject() {
+    let vendorsUnticked = 0;
+    const banner = document.querySelector('[class*="securiti"][class*="consent"]') ||
+                   document.querySelector('[class*="securiti"][class*="banner"]') ||
+                   document.querySelector('[id*="securiti"]');
+    if (!banner) return { vendorsUnticked };
+
+    const rejectBtn =
+      banner.querySelector('[class*="reject"]') ||
+      Utils.findByText('reject all', banner, 'button, a') ||
+      Utils.findByText('reject', banner, 'button, a') ||
+      Utils.findByText('do not consent', banner, 'button, a');
+    if (rejectBtn) rejectBtn.click();
+    return { vendorsUnticked };
+  });
+
+  // ──────────────── Transcend ────────────────────────
+  registerHandler('transcend', 'Transcend', function detect() {
+    return !!(
+      document.querySelector('[class*="transcend"]') ||
+      document.querySelector('[id*="transcend"]') ||
+      typeof window.transcend !== 'undefined'
+    );
+  }, async function reject() {
+    let vendorsUnticked = 0;
+    const banner = document.querySelector('[class*="transcend"][class*="consent"]') ||
+                   document.querySelector('[class*="transcend"][class*="banner"]') ||
+                   document.querySelector('[id*="transcend"]');
+    if (!banner) return { vendorsUnticked };
+
+    const rejectBtn =
+      banner.querySelector('[class*="reject"]') ||
+      Utils.findByText('do not sell', banner, 'button, a') ||
+      Utils.findByText('reject all', banner, 'button, a') ||
+      Utils.findByText('reject', banner, 'button, a') ||
+      Utils.findByText('opt out', banner, 'button, a');
+    if (rejectBtn) rejectBtn.click();
+    return { vendorsUnticked };
+  });
+
+  // ──────────────── CIVIC Cookie Control ────────────────────────
+  registerHandler('civic', 'CIVIC', function detect() {
+    return !!(
+      document.querySelector('[class*="civic-cookie"]') ||
+      document.querySelector('[id*="civic-cookie"]') ||
+      typeof window.CookieControl !== 'undefined'
+    );
+  }, async function reject() {
+    let vendorsUnticked = 0;
+    const banner = document.querySelector('[class*="civic-cookie"]') ||
+                   document.querySelector('[id*="civic-cookie"]');
+    if (!banner) return { vendorsUnticked };
+
+    const rejectBtn =
+      banner.querySelector('[class*="reject"]') ||
+      banner.querySelector('[class*="necessary"]') ||
+      Utils.findByText('reject', banner, 'button, a') ||
+      Utils.findByText('necessary only', banner, 'button, a') ||
+      Utils.findByText('reject all', banner, 'button, a');
+    if (rejectBtn) rejectBtn.click();
+    return { vendorsUnticked };
+  });
+
+  // ──────────────── FastCMP ────────────────────────
+  registerHandler('fastcmp', 'FastCMP', function detect() {
+    return !!(
+      document.querySelector('[id*="fastcmp"]') ||
+      document.querySelector('[class*="fastcmp"]') ||
+      typeof window.FastCMP !== 'undefined'
+    );
+  }, async function reject() {
+    let vendorsUnticked = 0;
+    const banner = document.querySelector('[id*="fastcmp"]') ||
+                   document.querySelector('[class*="fastcmp"]');
+    if (!banner) return { vendorsUnticked };
+
+    const rejectBtn =
+      banner.querySelector('[class*="reject"]') ||
+      Utils.findByText('reject all', banner, 'button, a') ||
+      Utils.findByText('reject', banner, 'button, a');
+    if (rejectBtn) rejectBtn.click();
+    return { vendorsUnticked };
+  });
+
+  // ──────────────── Lawwwing ────────────────────────
+  registerHandler('lawwwing', 'Lawwwing', function detect() {
+    return !!(
+      document.querySelector('[class*="lawwwing"]') ||
+      document.querySelector('[id*="lawwwing"]') ||
+      typeof window.Lawwwing !== 'undefined'
+    );
+  }, async function reject() {
+    let vendorsUnticked = 0;
+    const banner = document.querySelector('[class*="lawwwing"]') ||
+                   document.querySelector('[id*="lawwwing"]');
+    if (!banner) return { vendorsUnticked };
+
+    const rejectBtn =
+      banner.querySelector('[class*="reject"]') ||
+      Utils.findByText('rechazar', banner, 'button, a') ||
+      Utils.findByText('rechazar todo', banner, 'button, a') ||
+      Utils.findByText('reject', banner, 'button, a');
+    if (rejectBtn) rejectBtn.click();
+    return { vendorsUnticked };
+  });
+
+  // ──────────────── AVACY ────────────────────────
+  registerHandler('avacy', 'AVACY', function detect() {
+    return !!(
+      document.querySelector('[class*="avacy"]') ||
+      document.querySelector('[id*="avacy"]') ||
+      typeof window.AvacyCMP !== 'undefined'
+    );
+  }, async function reject() {
+    let vendorsUnticked = 0;
+    const banner = document.querySelector('[class*="avacy"]') ||
+                   document.querySelector('[id*="avacy"]');
+    if (!banner) return { vendorsUnticked };
+
+    const rejectBtn =
+      banner.querySelector('[class*="reject"]') ||
+      Utils.findByText('rifiuta', banner, 'button, a') ||
+      Utils.findByText('rifiuta tutto', banner, 'button, a') ||
+      Utils.findByText('reject', banner, 'button, a');
+    if (rejectBtn) rejectBtn.click();
+    return { vendorsUnticked };
+  });
+
+  // ──────────────── Consentmo ────────────────────────
+  registerHandler('consentmo', 'Consentmo', function detect() {
+    return !!(
+      document.querySelector('#cookie-consent-banner') ||
+      document.querySelector('[class*="consentmo"]') ||
+      document.querySelector('[id*="consentmo"]')
+    );
+  }, async function reject() {
+    let vendorsUnticked = 0;
+    const banner = document.querySelector('#cookie-consent-banner') ||
+                   document.querySelector('[class*="consentmo"]');
+    if (!banner) return { vendorsUnticked };
+
+    const rejectBtn =
+      banner.querySelector('[class*="reject"]') ||
+      banner.querySelector('[class*="deny"]') ||
+      Utils.findByText('reject', banner, 'button, a') ||
+      Utils.findByText('decline', banner, 'button, a') ||
+      Utils.findByText('only necessary', banner, 'button, a');
+    if (rejectBtn) rejectBtn.click();
+    return { vendorsUnticked };
+  });
+
+  // ──────────────── Pandectes ────────────────────────
+  registerHandler('pandectes', 'Pandectes', function detect() {
+    return !!(
+      document.querySelector('[class*="pandectes"]') ||
+      document.querySelector('[id*="pandectes"]') ||
+      typeof window.Pandectes !== 'undefined'
+    );
+  }, async function reject() {
+    let vendorsUnticked = 0;
+    const banner = document.querySelector('[class*="pandectes"]') ||
+                   document.querySelector('[id*="pandectes"]');
+    if (!banner) return { vendorsUnticked };
+
+    const rejectBtn =
+      banner.querySelector('[class*="reject"]') ||
+      Utils.findByText('reject all', banner, 'button, a') ||
+      Utils.findByText('reject', banner, 'button, a') ||
+      Utils.findByText('necessary only', banner, 'button, a');
+    if (rejectBtn) rejectBtn.click();
+    return { vendorsUnticked };
+  });
+
+  // ──────────────── Enzuzo ────────────────────────
+  registerHandler('enzuzo', 'Enzuzo', function detect() {
+    return !!(
+      document.querySelector('[class*="enzuzo"]') ||
+      document.querySelector('[id*="enzuzo"]') ||
+      typeof window.Enzuzo !== 'undefined'
+    );
+  }, async function reject() {
+    let vendorsUnticked = 0;
+    const banner = document.querySelector('[class*="enzuzo"]') ||
+                   document.querySelector('[id*="enzuzo"]');
+    if (!banner) return { vendorsUnticked };
+
+    const rejectBtn =
+      banner.querySelector('[class*="reject"]') ||
+      Utils.findByText('reject all', banner, 'button, a') ||
+      Utils.findByText('reject', banner, 'button, a') ||
+      Utils.findByText('do not sell', banner, 'button, a');
+    if (rejectBtn) rejectBtn.click();
+    return { vendorsUnticked };
+  });
+
+  // ──────────────── Cookie Script ────────────────────────
+  registerHandler('cookiescript', 'Cookie Script', function detect() {
+    return !!(
+      document.querySelector('#cookiescript_injected') ||
+      document.querySelector('[class*="cookiescript"]') ||
+      typeof window.cookieconsent !== 'undefined'
+    );
+  }, async function reject() {
+    let vendorsUnticked = 0;
+    const banner = document.querySelector('#cookiescript_injected') ||
+                   document.querySelector('[class*="cookiescript"]');
+    if (!banner) return { vendorsUnticked };
+
+    const rejectBtn =
+      banner.querySelector('#cookiescript_reject') ||
+      banner.querySelector('[class*="reject"]') ||
+      Utils.findByText('reject', banner, 'button, a') ||
+      Utils.findByText('decline', banner, 'button, a');
+    if (rejectBtn) rejectBtn.click();
+    return { vendorsUnticked };
+  });
+
+
   // ──────────────── Generic (fallback) ────────────────────────
   registerHandler('generic', 'Generic (fallback)', function detect() {
     return CMPDetector.detectGeneric();
@@ -1420,6 +2241,16 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       'only necessary', 'essential only', 'refuse',
       'i refuse', 'no thanks', 'no, thanks',
       'opt out', 'opt-out', 'disagree',
+      // CCPA / Do Not Sell patterns
+      'do not sell my personal information', 'do not sell my info',
+      'do not sell or share', 'limit the use of my data',
+      'opt out of sale', 'opt out of sharing',
+      'no vendan mi información', 'no vender mi información',
+      // Third-party hosted banner patterns (cookie-script, cookielaw, etc.)
+      'continue without cookies', 'block all', 'block cookies',
+      'disable all', 'turn off all', 'decline all cookies',
+      'non necessary', 'non-essential only', 'reject targeting',
+      'reject advertising', 'reject analytics',
       'continue without accepting', 'manage choices',
       'necessary cookies only', 'strictly necessary only',
       'accept only essential', 'accept required',
@@ -1439,6 +2270,35 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       'rifiuta tutto', 'rifiuta', 'solo necessari',
       // Dutch
       'weiger alles', 'weigeren', 'alleen noodzakelijk',
+      // Portuguese
+      'rejeitar tudo', 'rejeitar', 'recusar', 'recusar tudo',
+      'só necessários', 'apenas necessários',
+      // Polish
+      'odrzuć wszystko', 'odrzuć', 'tylko niezbędne',
+      'nie akceptuję', 'nie zgadzam się',
+      // Czech
+      'odmítnout vše', 'odmítnout', 'pouze nezbytné',
+      // Swedish
+      'avvisa alla', 'avvisa', 'neka', 'endast nödvändiga',
+      // Danish
+      'afvis alle', 'afvis', 'kun nødvendige',
+      // Romanian
+      'respinge tot', 'respinge', 'doar necesare',
+      // Hungarian
+      'elutasítom', 'elutasít', 'csak szükséges',
+      'összes elutasítása',
+      // Japanese
+      'すべて拒否', '拒否', '必要なもののみ',
+      // Korean
+      '모두 거부', '거부', '필수만',
+      // Chinese
+      '全部拒绝', '拒绝', '仅限必要',
+      // Turkish
+      'tümünü reddet', 'reddet', 'sadece gerekli',
+      'kabul etmiyorum',
+      // Russian
+      'отклонить все', 'отклонить', 'только необходимые',
+      'не принимаю',
     ];
 
     // Common manage/preferences text patterns
@@ -1458,6 +2318,33 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       // Spanish
       'configuración de cookies', 'gestionar cookies',
       'configurar', 'ajustes de privacidad',
+      // Portuguese
+      'configurações de cookies', 'gerenciar cookies',
+      'preferências de privacidade',
+      // Polish
+      'ustawienia plików cookie', 'zarządzaj ciasteczkami',
+      'preferencje prywatności',
+      // Swedish
+      'cookieinställningar', 'hantera cookies',
+      'integritetsinställningar',
+      // Danish
+      'cookieindstillinger', 'administrer cookies',
+      // Czech
+      'nastavení cookies', 'spravovat cookies',
+      // Romanian
+      'setări cookies', 'gestiona cookie-uri',
+      // Hungarian
+      'cookie-beállítások', 'süti beállítások',
+      // Japanese
+      'クッキー設定', ' Cookie設定',
+      // Korean
+      '쿠키 설정',
+      // Chinese
+      'cookie设置', ' Cookie设置',
+      // Turkish
+      'çerez ayarları', 'gizlilik ayarları',
+      // Russian
+      'настройки файлов cookie', 'управление файлами cookie',
     ];
 
     // Common save/confirm text patterns
@@ -1480,6 +2367,31 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       'salva', 'conferma', 'salva preferenze',
       // Dutch
       'opslaan', 'bevestigen', 'voorkeuren opslaan',
+      // Portuguese
+      'salvar', 'confirmar', 'salvar preferências',
+      'guardar preferências',
+      // Polish
+      'zapisz', 'potwierdź', 'zapisz preferencje',
+      // Swedish
+      'spara', 'bekräfta', 'spara inställningar',
+      // Danish
+      'gem', 'bekræft', 'gem indstillinger',
+      // Czech
+      'uložit', 'potvrdit', 'uložit předvolby',
+      // Romanian
+      'salvează', 'confirmă', 'salvează preferințele',
+      // Hungarian
+      'mentés', 'megerősít', 'beállítások mentése',
+      // Japanese
+      '保存', '確認', '設定を保存',
+      // Korean
+      '저장', '확인', '설정 저장',
+      // Chinese
+      '保存', '确认', '保存设置',
+      // Turkish
+      'kaydet', 'onayla', 'tercihleri kaydet',
+      // Russian
+      'сохранить', 'подтвердить', 'сохранить настройки',
     ];
 
     // Find and click reject button -- single DOM pass for all patterns
@@ -1498,7 +2410,8 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       }
       // Verify the button is in a cookie/consent context
       if (btn) {
-        const contextEl = btn.closest('[class*="cookie"], [class*="consent"], [class*="privacy"], [class*="gdpr"], [id*="cookie"], [id*="consent"], [class*="banner"], [class*="popup"], [class*="modal"], [role="dialog"]');
+
+        const contextEl = btn.closest('[class*="cookie"], [class*="consent"], [class*="privacy"], [class*="gdpr"], [class*="ccpa"], [id*="cookie"], [id*="consent"], [id*="gdpr"], [id*="ccpa"], [class*="banner"], [class*="popup"], [class*="modal"], [class*="notice"], [role="dialog"], [class*="do-not-sell"], [class*="opt-out"], [class*="cookieconsent"], [class*="cookielaw"]');
         if (!contextEl) {
           btn = null; // Not in a consent context, skip
         }
@@ -1998,6 +2911,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
 
         // Run the CMP-specific rejection
         const result = await handler.reject();
+
         DebugLog.log('Handler result:', result);
 
         // Also try TCF API rejection for any IAB-compliant CMP

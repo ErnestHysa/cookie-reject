@@ -2,6 +2,64 @@
 
 All notable changes to CookieReject will be documented in this file.
 
+## [1.8.0] - 2026-04-15
+
+### Added -- 31 New CMP Handlers (16 -> 47 + generic)
+
+**Tier 1 -- Major install base:**
+- Complianz (1M+ WordPress installs)
+- Cookie Notice / Humanityco (900K+ WordPress installs)
+- Osano (100K+ websites globally)
+- Termly (100K+ WordPress installs)
+- Cookie Information (100K+ sites, Nordic market leader)
+- Real Cookie Banner / devowl.io (100K+ WordPress installs)
+
+**WordPress plugins:**
+- Moove GDPR Cookie Compliance (300K+ installs)
+- CookieAdmin (300K+ installs)
+- Beautiful Cookie Consent Banner (40K+ installs)
+- Pressidium Cookie Consent (10K+ installs)
+- WPLP Cookie Consent (20K+ installs)
+
+**Tier 2 -- Significant market share:**
+- Axeptio (popular French CMP)
+- Admiral (10K+ publisher sites)
+- Commanders Act / TagCommander (French tag+CMP platform)
+- CookieFirst (growing EU CMP)
+- CookieHub (20K+ sites)
+- Gravito (UK/EU CMP)
+
+**Tier 3 -- Niche/regional CMPs:**
+- TRUENDO, Clickio, AppConsent/SFBX, Cloudflare, Securiti,
+  Transcend, CIVIC Cookie Control, FastCMP, Lawwwing (Spanish),
+  AVACY (Italian), Consentmo, Pandectes, Enzuzo, Cookie Script
+
+### Added -- Generic Handler Improvements
+
+**12 new languages for reject/preferences/save text matching:**
+- Portuguese, Polish, Czech, Swedish, Danish, Romanian,
+  Hungarian, Japanese, Korean, Chinese, Turkish, Russian
+- Coverage expanded from 6 to 18 languages
+
+**CCPA / "Do Not Sell" support:**
+- New reject patterns: "do not sell my personal information",
+  "limit the use of my data", "opt out of sale/sharing",
+  Spanish-language CCPA patterns
+- New detection selectors for CCPA banners and opt-out overlays
+
+**Better vendor toggle handling:**
+- untickAllToggles now skips "strictly necessary" / "essential"
+  labeled toggles (prevents unticking required categories)
+- Expanded toggle selectors for more CMP frameworks
+  (cmplz-toggle, moove-gdpr-form, consent-toggle, etc.)
+- Custom toggle switches now match more patterns:
+  button/a[role="switch"], data-role="switch",
+  legitimate-interest toggles
+- New banner detection selectors: 30+ additional CSS patterns
+  for cookie bars, CCPA notices, third-party hosted banners
+
+Bumped version: 1.7.0 -> 1.8.0 (+917 lines)
+
 ## [1.7.0] - 2026-04-14
 
 ### Fixed (HIGH)

@@ -76,24 +76,19 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
      */
     isVisible(el) {
       if (!el) return false;
-      // Cheap check: if offsetParent exists, element is definitely visible
-      // (offsetParent is null only for display:none or position:fixed)
-      if (el.offsetParent !== null) return true;
-      // Quick check: if element or its direct parent has inline display:none
-      if (el.style.display === 'none') return false;
-      // offsetParent is null -- could be display:none or position:fixed
+      // offsetParent is null for display:none and position:fixed elements.
+      // For position:fixed, we still need to check visibility/opacity below.
       const style = getComputedStyle(el);
       if (style.display === 'none') return false;
       if (style.visibility === 'hidden') return false;
       if (parseFloat(style.opacity) === 0) return false;
+      // offsetParent check: if non-null, element has layout (not display:none).
+      // This is a fast path but must come AFTER visibility/opacity checks.
+      if (el.offsetParent !== null) return true;
+      // offsetParent is null -- could be position:fixed or display:none.
+      // display:none already handled above. Check for zero-size elements.
       const rect = el.getBoundingClientRect();
       if (rect.width === 0 && rect.height === 0) return false;
-      // Check if element is positioned far off-screen
-      const viewWidth = window.innerWidth || document.documentElement.clientWidth;
-      const viewHeight = window.innerHeight || document.documentElement.clientHeight;
-      if (rect.right < -100 || rect.bottom < -100 || rect.left > viewWidth + 100 || rect.top > viewHeight + 100) {
-        return false;
-      }
       return true;
     },
 
@@ -495,7 +490,8 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     return !!(
       document.getElementById('onetrust-banner-sdk') ||
       document.getElementById('onetrust-consent-sdk') ||
-      window.OneTrust
+      window.OneTrust ||
+      window.OptanonActiveGroups
     );
   }, async function reject() {
 
@@ -534,7 +530,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
 
         // If no reject-all in PC, untick all category toggles manually
         const categorySwitches = pcSdk.querySelectorAll(
-          '.category-switch-handler, input.ot-handler-toneop'
+          '.category-switch-handler, input.ot-handler-toggle'
         );
         for (const sw of categorySwitches) {
           if (sw.checked && !sw.disabled) {
@@ -680,7 +676,8 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     return !!(
       document.getElementById('ketch-consent-banner') ||
       document.getElementById('ketch-banner') ||
-      document.querySelector('[id*="ketch-consent"]')
+      document.querySelector('[id*="ketch-consent"]') ||
+      typeof window.ketchConsent !== 'undefined'
     );
   }, async function reject() {
     let rejected = 0;
@@ -1422,7 +1419,8 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   registerHandler('lgcookieslaw', 'LGCookiesLaw (PrestaShop)', function detect() {
     return !!(
       document.getElementById('lgcookieslaw_banner') ||
-      document.querySelector('.lgcookieslaw-banner')
+      document.querySelector('.lgcookieslaw-banner') ||
+      document.querySelector('[class*="lgcookieslaw"]')
     );
   }, async function reject() {
     let rejected = 0;
@@ -3176,10 +3174,10 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       const el = document.querySelector(sel);
       if (!el) {
         // No DOM element found for this CMP's known selector.
-        // The detection may have come from a window global only,
-        // so we can't confirm visibility via DOM -- assume visible
-        // and let existing logic handle it.
-        return true;
+        // Detection may have come from a window global only (e.g. window.admiral).
+        // If there's no banner element in the DOM, there's nothing to reject --
+        // returning false prevents 30s of wasted retry cycles.
+        return false;
       }
 
       return Utils.isVisible(el);

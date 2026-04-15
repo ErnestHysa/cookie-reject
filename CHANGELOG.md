@@ -2,6 +2,31 @@
 
 All notable changes to CookieReject will be documented in this file.
 
+## [1.9.0] - 2026-04-15
+
+### Fixed (MEDIUM)
+- #1: LGCookiesLaw handler detect() was missing `[class*="lgcookieslaw"]`
+  selector that CMPDetector.detect() uses. Pages matching only the broad
+  selector failed handler re-verification, leaving banners unrejected.
+
+### Fixed (LOW)
+- #2: OneTrust toggle selector `input.ot-handler-toneop` was a typo -- should
+  be `input.ot-handler-toggle`. Vendor/purpose toggles using only this class
+  were never found.
+- #3: Utils.isVisible() early `offsetParent !== null` return skipped
+  visibility:hidden and opacity:0 checks. Reordered to check
+  display/visibility/opacity first, then offsetParent as a fast path.
+  Correctly identifies visibility:hidden elements as invisible now.
+- #4: isCMPBannerVisible() returned true for window-global-only detections
+  (Admiral, Securiti, Transcend) with no DOM banner present, causing 30s
+  of wasted retry cycles. Now returns false when no banner element exists.
+- #5: Ketch handler detect() missing `window.ketchConsent` -- aligned with
+  CMPDetector entry so window-global detection path passes verification.
+- #6: OneTrust handler detect() missing `window.OptanonActiveGroups` --
+  aligned with CMPDetector entry for consistent detection.
+
+Bumped version: 1.8.2 -> 1.9.0
+
 ## [1.8.2] - 2026-04-15
 
 ### Fixed (CRITICAL)

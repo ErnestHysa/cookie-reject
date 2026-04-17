@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "CookieReject",
   "short_name": "CookieReject",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Auto-reject cookies, vendor consents, and privacy popups. Saves you time by unticking every vendor toggle so you don't have to.",
 
   "browser_specific_settings": {
@@ -16,7 +16,8 @@
     "storage",
     "tabs",
     "activeTab",
-    "alarms"
+    "alarms",
+    "scripting"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -70,6 +71,13 @@
         "mac": "Alt+Shift+R"
       },
       "description": "Reject cookies on the current page"
+    },
+    "toggle-global": {
+      "suggested_key": {
+        "default": "Alt+Shift+C",
+        "mac": "Alt+Shift+C"
+      },
+      "description": "Toggle CookieReject on/off globally"
     }
   }
 }

@@ -6,21 +6,21 @@
  * ─── TABLE OF CONTENTS ───────────────────────────────────────────────
  * Line   Section
  * ~~~~   ~~~~~~~
- *    7   Cross-Browser Polyfill Guard
- *   35   Debug Logging
- *   55   Configuration (CONFIG)
- *   77   Utilities (Utils.isVisible, findByText, untickAllToggles, etc.)
- *  150   TCF / USP / GPP API Helpers
- *  200   Handler Registration (registerHandler + auto-detect/selectors)
- *  470   CMP Detector (CMPDetector.detect, detectGeneric)
- *  530   CMP Handlers (47 named handlers + 1 generic fallback)
- *        - OneTrust (#530), CookieBot (#560), Didomi (#590), etc.
- *        - Generic fallback with 18-language support (#2560)
- * 2880   TCF API Handler
- * 2900   Consent Manager (high-level orchestrator)
- * 3020   Engine (init, detectAndReject, observer, retry loop)
- * 3490   SPA Navigation Support (pushState, hashchange)
- * 3540   Bootstrap (DOMContentLoaded)
+ *   30   Cross-Browser Polyfill Guard
+ *   94   Debug Logging
+ *  106   Configuration (CONFIG)
+ *  138   Utilities (Utils.isVisible, findByText, untickAllToggles, etc.)
+ *  360   CMP Detector (CMPDetector.detect, detectGeneric)
+ *  525   Handler Registration (registerHandler + auto-detect/selectors)
+ *  576   Common Handler Helpers (HandlerHelpers.standardReject)
+ *  636   CMP Handlers (47 named handlers + 1 generic fallback)
+ * 3035   Remote Rules Application
+ * 3058   TCF / USP / GPP API Handlers
+ * 3128   Banner Hider
+ * 3168   Engine (init, detectAndReject, observer, retry loop)
+ * 3640   Message Listener (popup/background communication)
+ * 3700   SPA Navigation Support (pushState, hashchange)
+ * 3760   Bootstrap (DOMContentLoaded)
  * ──────────────────────────────────────────────────────────────────────
  */
 
@@ -68,23 +68,18 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     })();
     if (!_isCMPFrame) return;
     // In a CMP iframe -- try generic rejection after a short delay
-    const _ifrUtils = Utils;
     setTimeout(() => {
       try {
-        const rejectBtns = _ifrUtils.findAllByText(
-          ['reject all', 'reject', 'decline', 'refuse', 'opt out', 'do not consent',
-           'manage choices', 'manage preferences', 'customise choices'],
-          document, 'button, a'
-        );
-        if (rejectBtns.length > 0) {
-          // Click the first button matching reject-priority texts
-          const priorityTexts = ['reject all', 'reject', 'decline', 'refuse', 'opt out', 'do not consent'];
-          for (const txt of priorityTexts) {
-            const match = rejectBtns.find(btn =>
-              (btn.textContent || '').trim().toLowerCase().includes(txt)
-            );
-            if (match) { match.click(); break; }
-          }
+        const rejectTexts = ['reject all', 'reject', 'decline', 'refuse', 'opt out', 'do not consent',
+          'manage choices', 'manage preferences', 'customise choices'];
+        const priorityTexts = ['reject all', 'reject', 'decline', 'refuse', 'opt out', 'do not consent'];
+        const buttons = document.querySelectorAll('button, a');
+        for (const txt of priorityTexts) {
+          const match = Array.from(buttons).find(btn =>
+            (btn.textContent || '').trim().toLowerCase().includes(txt) &&
+            btn.offsetHeight > 0
+          );
+          if (match) { match.click(); break; }
         }
       } catch (e) { /* iframe rejection failed silently */ }
     }, 2000);
@@ -224,7 +219,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       // Cache the element list for 2 seconds to avoid repeated DOM scans
       const cacheKey = root === document ? '_allBtns' : '_scopedBtns';
       const now = Date.now();
-      if (!this._textCache || !this._textCache[cacheKey] || now - this._textCache[cacheKey].ts > 2000) {
+      if (!this._textCache || !this._textCache[cacheKey] || now - this._textCache[cacheKey].ts > 500) {
         if (!this._textCache) this._textCache = {};
         this._textCache[cacheKey] = {
           els: Array.from(root.querySelectorAll(tag)),
@@ -523,6 +518,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
 
   // Auto-registered detector functions (populated by registerHandler)
   const _detectorEntries = [];
+
+  // Cached top CMP detectors (populated lazily)
+  let _topDetectorsCache = null;
 
   // Auto-registered primary selectors (populated by registerHandler)
   const _autoSelectors = {};
@@ -3035,6 +3033,25 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     return { rejected, vendorsUnticked };
   });
 
+  // ─── Remote Rules Application ─────────────────────────────────────────
+  // Apply remotely fetched rules (stored in cr_meta.remoteRules by background.js)
+  ;(async function applyRemoteRules() {
+    try {
+      const response = await new Promise(r => {
+        chrome.runtime.sendMessage({ type: 'GET_REMOTE_RULES' }, resp => r(resp));
+      });
+      if (response && Array.isArray(response) && response.length > 0) {
+        DebugLog.log(`Applying ${response.length} remote rules`);
+        for (const rule of response) {
+          if (!rule.id || !CMPHandlers[rule.id]) continue; // only update existing handlers
+          if (Array.isArray(rule.selectors) && rule.selectors.length > 0) {
+            // Update auto-selectors for visibility checks
+            _autoSelectors[rule.id] = rule.selectors.join(', ');
+          }
+        }
+      }
+    } catch { /* remote rules not available yet */ }
+  })();
 
   // ─── TCF API Handler ────────────────────────────────────────────────
   // Uses IAB TCF v2 API to programmatically reject consent
@@ -3167,6 +3184,8 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     _detecting: false,
     _handling: false,
     _pendingForceReject: false,
+    _lastVendorsUnticked: 0,
+    _intervalTickCount: 0,
     settings: {
       autoReject: true,
       untickVendors: true,
@@ -3297,7 +3316,10 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         // PERF-2: Check top CMPs first (most common globally) before full scan.
         // This avoids running all 47+ detectors on every observer tick.
         let cmp = null;
-        const topDetectors = _detectorEntries.filter(d => CONFIG.topCMPs.includes(d.id));
+        if (!_topDetectorsCache) {
+          _topDetectorsCache = _detectorEntries.filter(d => CONFIG.topCMPs.includes(d.id));
+        }
+        const topDetectors = _topDetectorsCache;
         for (const det of topDetectors) {
           try {
             const result = det.check();
@@ -3310,6 +3332,8 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         }
         // Only run full detection if top CMPs didn't match
         if (!cmp) {
+          // Invalidate cache since DOM has mutated since last full scan
+          CMPDetector._lastDetection = null;
           cmp = CMPDetector.detect();
         }
 
@@ -3363,7 +3387,22 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
           return;
         }
 
-        const cmp = CMPDetector.detect();
+        this._intervalTickCount++;
+        // Run full detection (including expensive generic scan) only every 5th tick
+        const cmp = (this._intervalTickCount % 5 === 1 || this._intervalTickCount < 3)
+          ? CMPDetector.detect()
+          : (() => {
+              // Fast path: only check named detectors, skip generic
+              for (const det of _detectorEntries) {
+                try {
+                  const r = det.check();
+                  if (r && (!(r instanceof HTMLElement) || Utils.isVisible(r))) {
+                    return { id: det.id, name: det.name, confidence: r instanceof HTMLElement ? 'high' : 'medium' };
+                  }
+                } catch { /* skip */ }
+              }
+              return null;
+            })();
         if (cmp) {
           clearInterval(this.intervalId);
           this.intervalId = null;
@@ -3446,6 +3485,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         const result = await handler.reject();
 
         DebugLog.log('Handler result:', result);
+        this._lastVendorsUnticked = result.vendorsUnticked || 0;
 
         // Also try TCF API rejection for any IAB-compliant CMP
         // (only if the setting is enabled)
@@ -3473,6 +3513,11 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
           this.lastFailedAttempt = Date.now();
           const visibleSel = this._primarySelectors[cmp.id] || 'unknown';
           DebugLog.warn('False positive -- banner still visible after rejection. Selector:', visibleSel);
+          // Log failed rejection for analytics
+          this.sendMessage({
+            type: 'LOG_FAILED_REJECTION',
+            data: { domain: this.getDomain(), cmp: cmp.name, reason: 'banner_still_visible' },
+          });
           // Invalidate cache so retries get fresh detection
           CMPDetector.invalidateCache();
           return;
@@ -3503,6 +3548,11 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         }
       } catch (e) {
         DebugLog.error('Error handling CMP:', e.message);
+        // Log failed rejection due to error
+        this.sendMessage({
+          type: 'LOG_FAILED_REJECTION',
+          data: { domain: this.getDomain(), cmp: cmp.name || 'unknown', reason: 'handler_error: ' + e.message },
+        });
       } finally {
         this._handling = false;
       }
@@ -3614,6 +3664,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         sendResponse({
           processed: Engine.processed,
           cmp: Engine.currentCMP,
+          vendorsUnticked: Engine._lastVendorsUnticked || 0,
           domain: Engine.getDomain(),
           timestamp: Engine.initTimestamp,
         });

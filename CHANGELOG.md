@@ -2,6 +2,46 @@
 
 All notable changes to CookieReject will be documented in this file.
 
+## [2.2.0] - 2025-04-17
+
+### Fixed
+- **BUG-1**: Added missing `scripting` permission -- Google Consent Mode (FEAT-6) was silently failing
+- **BUG-2**: Fixed `ListManager.setList()` and `removeEntry()` writing to local storage instead of SyncStorage -- whitelist/blacklist entries may not have persisted across sessions
+- **BUG-3**: Fixed `Utils` temporal dead zone reference in iframe code -- iframe CMP rejection path was completely dead (threw ReferenceError)
+- **BUG-4**: Completed light theme CSS -- was only 5 overrides, now 51 covering all UI components
+- **BUG-5**: Added `LOG_FAILED_REJECTION` triggers in content.js -- the backend handler existed but was never called
+- **ROB-2**: Added cache invalidation in smart observer fallback path to prevent stale detection results
+- **ROB-3**: Added `vendorsUnticked` field to `GET_STATUS_CONTENT` response -- popup site details now show correct vendor count
+- **ROB-4**: Added user feedback toast for invalid domain inputs in whitelist/blacklist add
+
+### Performance
+- **PERF-1**: Reduced `findAllByText` cache TTL from 2000ms to 500ms to avoid stale DOM references
+- **PERF-2**: Cached top CMP detectors array to avoid re-filtering on every MutationObserver tick (every 300ms)
+- **PERF-3**: Interval callback now skips expensive `detectGeneric()` on most ticks (runs every 5th tick, always on first 2)
+
+### Architecture
+- **ARCH-1**: Added remote rules consumption in content.js -- fetched rules now update `_autoSelectors` for existing handlers
+- **ARCH-2**: Added `_tabStatesLoaded` guard to prevent persisting tab states before initial load completes
+- **ARCH-3**: Added CSP/permissions error message in Consent Mode injection fallback
+- **ARCH-4**: Removed unnecessary `browser-polyfill.js` script tag from popup.html (extension pages already have `chrome` APIs)
+
+### Code Quality
+- **CQ-1**: Documented monolith split as future work (content.js is 3780+ lines)
+- **CQ-3**: Replaced 5-chain `.replace()` escapeHTML with single-regex + lookup map
+- **CQ-5**: Updated Table of Contents line numbers to match actual file structure
+- **CQ-6**: Fixed popup footer to say "48 CMP frameworks" instead of "47+"
+
+### UX
+- **UX-1**: Moved "today count" calculation to server-side (new `GET_TODAY_COUNT` handler) instead of loading 500 log entries client-side
+- **UX-2**: Added pulse animation on "Reject Now" button during rejection
+- **UX-3**: Added activity sort dropdown (Newest/Oldest/Domain A-Z/Most vendors)
+- **UX-4**: Added search inputs for whitelist and blacklist tabs
+- **UX-5**: "Report undetected banner" link now includes the detected CMP name
+
+### New Features
+- **SUG-5**: Added `Alt+Shift+C` keyboard shortcut to toggle extension on/off globally
+- **SUG-6**: Added separate Export Whitelist / Export Blacklist buttons
+
 ## [2.1.0] - 2025-04-17
 
 ### Fixed

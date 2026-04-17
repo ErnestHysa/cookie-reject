@@ -90,7 +90,15 @@
     <div class="tab-content" role="tabpanel" aria-labelledby="tab-btn-activity" id="tab-activity">
       <div class="activity-header">
         <h3>Recent Activity</h3>
-        <button class="btn btn-sm btn-outline" id="clearLogBtn">Clear</button>
+        <div class="activity-controls">
+          <select id="activitySort" class="input activity-sort" aria-label="Sort activity">
+            <option value="time-desc">Newest first</option>
+            <option value="time-asc">Oldest first</option>
+            <option value="domain-asc">Domain A-Z</option>
+            <option value="vendors-desc">Most vendors</option>
+          </select>
+          <button class="btn btn-sm btn-outline" id="clearLogBtn">Clear</button>
+        </div>
       </div>
       <input type="text" id="activitySearch" placeholder="Filter by domain..." class="input activity-search" aria-label="Filter activity by domain name">
       <div class="activity-list" id="activityList">
@@ -105,6 +113,7 @@
       <div class="list-section">
         <h3>Whitelist <span class="badge" id="whitelistCount">0</span></h3>
         <p class="list-desc">Sites where CookieReject will NOT run</p>
+        <input type="text" id="whitelistSearch" placeholder="Search whitelist..." class="input list-search">
         <div class="list-add">
           <input type="text" id="whitelistInput" placeholder="e.g. example.com" class="input">
           <button class="btn btn-sm btn-primary" id="addWhitelistBtn">Add</button>
@@ -114,6 +123,7 @@
       <div class="list-section">
         <h3>Blacklist <span class="badge" id="blacklistCount">0</span></h3>
         <p class="list-desc">Sites where CookieReject ALWAYS runs (overrides auto-detect)</p>
+        <input type="text" id="blacklistSearch" placeholder="Search blacklist..." class="input list-search">
         <div class="list-add">
           <input type="text" id="blacklistInput" placeholder="e.g. example.com" class="input">
           <button class="btn btn-sm btn-primary" id="addBlacklistBtn">Add</button>
@@ -126,6 +136,8 @@
           <button class="btn btn-outline" id="exportBtn">Export Data</button>
           <button class="btn btn-outline" id="exportCsvBtn">Export CSV</button>
           <button class="btn btn-outline" id="importBtn">Import Data</button>
+          <button class="btn btn-outline btn-sm" id="exportWhitelistBtn">Export Whitelist</button>
+          <button class="btn btn-outline btn-sm" id="exportBlacklistBtn">Export Blacklist</button>
           <input type="file" id="importFile" accept=".json" style="display:none">
         </div>
       </div>
@@ -212,14 +224,13 @@
       </div>
       </div><!-- /settingsControls -->
       <div class="footer">
-        Supports 47+ CMP frameworks
+        Supports 48 CMP frameworks
         <span class="footer-sep">|</span>
         <span id="footerVersion"></span>
       </div>
     </div>
   </div>
 
-  <script src="../browser-polyfill.js"></script>
   <script src="popup.js"></script>
 
   <!-- Fix #21: Themed confirm dialog for reset stats -->

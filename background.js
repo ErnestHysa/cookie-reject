@@ -403,7 +403,7 @@
 
     async setList(listName, list) {
       const key = listName === 'whitelist' ? STORAGE_KEYS.WHITELIST : STORAGE_KEYS.BLACKLIST;
-      return Storage.set(key, list);
+      return SyncStorage.set(key, list);
     },
 
     async addEntry(listName, domain) {
@@ -439,7 +439,7 @@
         const before = list.length;
         list = list.filter(e => !this.domainMatches(domain, e.domain));
         if (list.length < before) {
-          await Storage.set(storageKey, list);
+          await SyncStorage.set(storageKey, list);
           return true;
         }
         return false;
@@ -755,6 +755,7 @@
         }
 
         case 'LOG_FAILED_REJECTION': {
+          // NOTE: This handler should also be called from content.js for handleCMP false-positive paths
           const { data } = message;
           debugLog('Failed rejection:', data.domain, data.cmp);
           // Store failed rejections separately for analytics
@@ -809,7 +810,8 @@
               });
             }
           } catch (e) {
-            debugLog('REJECT_CONSENT_MODE failed:', e.message);
+            debugLog('REJECT_CONSENT_MODE failed (CSP or permissions):', e.message);
+            return { success: false, error: 'Consent Mode injection blocked by page CSP or missing permissions' };
           }
           return { success: false };
         }
@@ -946,7 +948,10 @@
             }
             await Storage.set(STORAGE_KEYS.META, meta);
             return { success: true };
-          }).catch(e => ({ success: false, error: e.message }));
+          }).catch(e => {
+            console.error('[CookieReject]', 'SET_CMP_OVERRIDE storage failed:', e.message);
+            return { success: false, error: e.message };
+          });
         }
 
         case 'GET_CMP_OVERRIDE': {
@@ -955,9 +960,22 @@
           return { override: override || null };
         }
 
+        case 'GET_REMOTE_RULES': {
+          const meta = await Storage.get(STORAGE_KEYS.META, {});
+          return (meta.remoteRules && meta.remoteRules.rules) || [];
+        }
+
         // ── Version info ──
         case 'GET_VERSION': {
           return { version: APP_VERSION };
+        }
+
+        case 'GET_TODAY_COUNT': {
+          const log = await Storage.get(STORAGE_KEYS.LOG, []);
+          const todayStart = new Date();
+          todayStart.setHours(0, 0, 0, 0);
+          const count = log.filter(e => e.timestamp && e.timestamp >= todayStart.getTime()).length;
+          return { count };
         }
 
         default:
@@ -985,12 +1003,27 @@
         });
       }
     }
+
+    if (command === 'toggle-global') {
+      debugLog('Keyboard shortcut triggered: toggle-global');
+      const settings = await SettingsManager.get();
+      await SettingsManager.update({ enabled: !settings.enabled });
+      // Broadcast to all tabs
+      chrome.tabs.query({}, (tabs) => {
+        for (const t of tabs) {
+          chrome.tabs.sendMessage(t.id, { type: 'SETTINGS_UPDATED', settings: { enabled: !settings.enabled } }, () => {
+            if (chrome.runtime.lastError) { /* ignore */ }
+          });
+        }
+      });
+    }
   });
 
   // ─── Badge Management ───────────────────────────────────────────────
   let _badgeUpdateTimer = null;
   // Persist tab states to session storage so they survive SW restarts
   const _tabStates = {};
+  let _tabStatesLoaded = false;
   async function _loadTabStates() {
     try {
       if (chrome.storage.session) {
@@ -998,6 +1031,7 @@
         if (data._tabStates) Object.assign(_tabStates, data._tabStates);
       }
     } catch { /* session storage not available */ }
+    _tabStatesLoaded = true;
   }
   async function _saveTabStates() {
     try {
@@ -1024,7 +1058,7 @@
     // Set per-tab badge color to indicate rejection status
     async setTabState(tabId, rejected, cmp) {
       _tabStates[tabId] = { rejected, cmp };
-      _saveTabStates(); // fire-and-forget persist
+      if (_tabStatesLoaded) _saveTabStates(); // only persist after initial load
       try {
         if (rejected) {
           chrome.action.setBadgeBackgroundColor({ color: '#4CAF50', tabId }); // green = rejected

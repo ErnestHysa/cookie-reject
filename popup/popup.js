@@ -38,10 +38,10 @@
     });
   }
 
+  const _escapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
   function escapeHTML(str) {
     if (!str) return '';
-    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    return str.replace(/[&<>"']/g, c => _escapeMap[c]);
   }
 
   function renderActivityItems(entries) {
@@ -99,6 +99,18 @@
       (e.domain || '').toLowerCase().includes(term) ||
       (e.cmp || '').toLowerCase().includes(term)
     );
+  }
+
+  // UX-3: Sort activity entries
+  function sortActivityEntries(entries, sortKey) {
+    if (!sortKey || sortKey === 'time-desc') return entries;
+    const sorted = [...entries];
+    switch (sortKey) {
+      case 'time-asc': sorted.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0)); break;
+      case 'domain-asc': sorted.sort((a, b) => (a.domain || '').localeCompare(b.domain || '')); break;
+      case 'vendors-desc': sorted.sort((a, b) => (b.vendorsUnticked || 0) - (a.vendorsUnticked || 0)); break;
+    }
+    return sorted;
   }
 
   // UX-5: Toast with undo button
@@ -323,10 +335,9 @@
     $('statVendors').textContent = stats.totalVendorsUnticked || 0;
     $('statTime').textContent = stats.timeSavedFormatted || '0s';
 
-    // UX-2: Today count
-    const todayLog = await sendMessage({ type: 'GET_LOG', limit: 500 });
-    const todayCount = (todayLog || []).filter(e => e.timestamp && (Date.now() - e.timestamp < 86400000)).length;
-    $('statToday').textContent = todayCount;
+    // UX-1: Today count (server-side for performance)
+    const todayResult = await sendMessage({ type: 'GET_TODAY_COUNT' });
+    $('statToday').textContent = (todayResult && todayResult.count) || 0;
   }
 
   // ─── Activity ──────────────────────────────────────────────────────
@@ -347,8 +358,9 @@
 
     const searchTerm = ($('activitySearch').value || '').trim();
     const filtered = filterActivityEntries(_allActivityEntries, searchTerm);
-
-    const visible = filtered.slice(0, activityLimit);
+    const sortKey = $('activitySort') ? $('activitySort').value : 'time-desc';
+    const sorted = sortActivityEntries(filtered, sortKey);
+    const visible = sorted.slice(0, activityLimit);
     const container = $('activityList');
 
     if (visible.length === 0) {
@@ -372,22 +384,26 @@
       sendMessage({ type: 'GET_LIST', list: 'whitelist' }),
       sendMessage({ type: 'GET_LIST', list: 'blacklist' }),
     ]);
-
-    renderList('whitelist', whitelist || [], 'whitelistItems', 'whitelistCount');
-    renderList('blacklist', blacklist || [], 'blacklistItems', 'blacklistCount');
+    const wlSearch = $('whitelistSearch') ? $('whitelistSearch').value.trim() : '';
+    const blSearch = $('blacklistSearch') ? $('blacklistSearch').value.trim() : '';
+    renderList('whitelist', whitelist || [], 'whitelistItems', 'whitelistCount', wlSearch);
+    renderList('blacklist', blacklist || [], 'blacklistItems', 'blacklistCount', blSearch);
   }
 
-  function renderList(type, items, containerId, countId) {
+  function renderList(type, items, containerId, countId, searchTerm = '') {
     const container = $(containerId);
     const countEl = $(countId);
     countEl.textContent = items.length;
-
-    if (items.length === 0) {
-      container.innerHTML = '<div class="empty-state">No entries</div>';
+    let filtered = items;
+    if (searchTerm) {
+      const term = searchTerm.toLowerCase();
+      filtered = items.filter(i => i.domain.toLowerCase().includes(term));
+    }
+    if (filtered.length === 0) {
+      container.innerHTML = '<div class="empty-state">' + (searchTerm ? 'No matches' : 'No entries') + '</div>';
       return;
     }
-
-    container.innerHTML = items.map(item => `
+    container.innerHTML = filtered.map(item => `
       <div class="list-item">
         <span class="list-item-domain">${escapeHTML(item.domain)}</span>
         <button class="list-item-remove" data-list="${type}" data-domain="${escapeHTML(item.domain)}" title="Remove">&times;</button>
@@ -400,21 +416,29 @@
     $('addWhitelistBtn').addEventListener('click', async () => {
       const domain = $('whitelistInput').value.trim();
       if (!domain) return;
-      await sendMessage({ type: 'ADD_TO_LIST', list: 'whitelist', domain });
+      const result = await sendMessage({ type: 'ADD_TO_LIST', list: 'whitelist', domain });
       $('whitelistInput').value = '';
-      loadLists();
-      loadCurrentSite();
-      showToast('Added to whitelist');
+      if (result && result.success) {
+        loadLists();
+        loadCurrentSite();
+        showToast('Added to whitelist');
+      } else {
+        showToast('Invalid domain or already in list', true);
+      }
     });
 
     // Add to blacklist
     $('addBlacklistBtn').addEventListener('click', async () => {
       const domain = $('blacklistInput').value.trim();
       if (!domain) return;
-      await sendMessage({ type: 'ADD_TO_LIST', list: 'blacklist', domain });
+      const result = await sendMessage({ type: 'ADD_TO_LIST', list: 'blacklist', domain });
       $('blacklistInput').value = '';
-      loadLists();
-      showToast('Added to blacklist');
+      if (result && result.success) {
+        loadLists();
+        showToast('Added to blacklist');
+      } else {
+        showToast('Invalid domain or already in list', true);
+      }
     });
 
     // Remove from list (delegated)
@@ -436,12 +460,14 @@
     $('rejectNowBtn').addEventListener('click', async () => {
       $('rejectNowBtn').disabled = true;
       $('rejectNowBtn').textContent = 'Rejecting...';
+      $('rejectNowBtn').classList.add('rejecting');
       try {
         const response = await sendTabMessage({ type: 'FORCE_REJECT' });
         // Wait a moment then refresh
         setTimeout(async () => {
           $('rejectNowBtn').disabled = false;
           $('rejectNowBtn').textContent = 'Reject Now';
+          $('rejectNowBtn').classList.remove('rejecting');
           await loadCurrentSite();
           await loadStats();
           await loadActivity();
@@ -449,6 +475,7 @@
       } catch (e) {
         $('rejectNowBtn').disabled = false;
         $('rejectNowBtn').textContent = 'Reject Now';
+        $('rejectNowBtn').classList.remove('rejecting');
         showToast('Cannot reach this page (browser/extension page?)');
       }
     });
@@ -653,6 +680,32 @@
       }
       e.target.value = '';
     });
+
+    // SUG-6: Export individual lists
+    $('exportWhitelistBtn').addEventListener('click', async () => {
+      const list = await sendMessage({ type: 'GET_LIST', list: 'whitelist' });
+      if (!list || list.length === 0) { showToast('Whitelist is empty', true); return; }
+      const blob = new Blob([JSON.stringify(list, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'cookiereject-whitelist.json';
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast('Whitelist exported');
+    });
+    $('exportBlacklistBtn').addEventListener('click', async () => {
+      const list = await sendMessage({ type: 'GET_LIST', list: 'blacklist' });
+      if (!list || list.length === 0) { showToast('Blacklist is empty', true); return; }
+      const blob = new Blob([JSON.stringify(list, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'cookiereject-blacklist.json';
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast('Blacklist exported');
+    });
   }
 
   // ─── CSV Export (FEAT-3) ──────────────────────────────────────────
@@ -718,7 +771,8 @@
     // FEAT-5: Report undetected banner
     $('reportBanner').addEventListener('click', () => {
       const domain = $('siteDomain').textContent;
-      const url = `https://github.com/ErnestHysa/cookie-reject/issues/new?title=Undetected+banner+on+${encodeURIComponent(domain)}&body=${encodeURIComponent(`**URL:** ${domain}\n**Browser:** ${navigator.userAgent}\n**Extension version:** ${$('version').textContent}\n\n**Description:**\nPlease describe the banner and any relevant details about the website.`)}`;
+      const detectedCMP = $('siteCMP') ? $('siteCMP').textContent : 'None';
+      const url = `https://github.com/ErnestHysa/cookie-reject/issues/new?title=Undetected+banner+on+${encodeURIComponent(domain)}&body=${encodeURIComponent(`**URL:** ${domain}\n**Browser:** ${navigator.userAgent}\n**Extension version:** ${$('version').textContent}\n**Detected CMP:** ${detectedCMP}\n\n**Description:**\nPlease describe the banner and any relevant details about the website.`)}`;
       chrome.tabs.create({ url });
     });
 
@@ -733,6 +787,19 @@
     // Fix #23: Load more activity entries
     $('loadMoreBtn').addEventListener('click', () => loadActivity(true));
 
+    // UX-3: Activity sorting
+    if ($('activitySort')) {
+      $('activitySort').addEventListener('change', () => loadActivity());
+    }
+
+    // UX-4: List search
+    if ($('whitelistSearch')) {
+      $('whitelistSearch').addEventListener('input', () => loadLists());
+    }
+    if ($('blacklistSearch')) {
+      $('blacklistSearch').addEventListener('input', () => loadLists());
+    }
+
     // Activity search filter (Fix #13, Fix #24: debounced)
     $('activitySearch').addEventListener('input', () => {
       clearTimeout(_searchDebounce);
@@ -740,7 +807,9 @@
         activityLimit = 30;
         const searchTerm = ($('activitySearch').value || '').trim();
         const filtered = filterActivityEntries(_allActivityEntries, searchTerm);
-        const visible = filtered.slice(0, activityLimit);
+        const sortKey = $('activitySort') ? $('activitySort').value : 'time-desc';
+        const sorted = sortActivityEntries(filtered, sortKey);
+        const visible = sorted.slice(0, activityLimit);
         const container = $('activityList');
         if (visible.length === 0) {
           container.innerHTML = '<div class="empty-state">' +

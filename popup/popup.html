@@ -21,6 +21,7 @@
         <input type="checkbox" id="masterToggle" checked>
         <span class="slider"></span>
       </label>
+      <button id="themeToggle" class="btn-icon" title="Toggle theme">🌙</button>
     </header>
 
     <!-- Tab Bar -->
@@ -57,28 +58,32 @@
         <div class="site-actions">
           <button class="btn btn-primary" id="rejectNowBtn">Reject Now</button>
           <button class="btn btn-outline" id="whitelistBtn">Whitelist</button>
+          <button id="blacklistBtn" class="btn btn-sm btn-danger">Blacklist</button>
         </div>
       </div>
 
       <!-- Stats Grid -->
       <div class="stats-grid">
         <div class="stat-card">
-          <div class="stat-value" id="statRejected">0</div>
+          <div class="stat-value" id="statRejected">...</div>
           <div class="stat-label">Banners Rejected</div>
         </div>
         <div class="stat-card">
-          <div class="stat-value" id="statUnique">0</div>
+          <div class="stat-value" id="statUnique">...</div>
           <div class="stat-label">Unique Sites</div>
         </div>
         <div class="stat-card">
-          <div class="stat-value" id="statVendors">0</div>
+          <div class="stat-value" id="statVendors">...</div>
           <div class="stat-label">Vendors Unticked</div>
         </div>
         <div class="stat-card">
-          <div class="stat-value" id="statTime">0s</div>
+          <div class="stat-value" id="statTime">...</div>
           <div class="stat-label">Time Saved (est.)</div>
         </div>
       </div>
+      <!-- UX-2: Today count -->
+      <div class="stats-today">Today: <span id="statToday">0</span> rejections</div>
+      <a href="#" id="reportBanner" class="report-link">Report undetected banner</a>
     </div>
 
     <!-- Activity Tab -->
@@ -119,6 +124,7 @@
         <h3>Data Management</h3>
         <div class="data-actions">
           <button class="btn btn-outline" id="exportBtn">Export Data</button>
+          <button class="btn btn-outline" id="exportCsvBtn">Export CSV</button>
           <button class="btn btn-outline" id="importBtn">Import Data</button>
           <input type="file" id="importFile" accept=".json" style="display:none">
         </div>
@@ -127,6 +133,7 @@
 
     <!-- Settings Tab -->
     <div class="tab-content" role="tabpanel" aria-labelledby="tab-btn-settings" id="tab-settings">
+      <div id="settingsControls">
       <div class="setting-group">
         <h3>Rejection</h3>
         <div class="setting-item">
@@ -182,6 +189,16 @@
             <span class="slider"></span>
           </label>
         </div>
+        <div class="setting-item">
+          <div>
+            <div class="setting-name">Dry Run Mode</div>
+            <div class="setting-desc">Detect banners but skip rejection (for testing)</div>
+          </div>
+          <label class="toggle-switch-sm">
+            <input type="checkbox" id="settingDryRun">
+            <span class="slider"></span>
+          </label>
+        </div>
       </div>
       <div class="setting-group">
         <h3>Data</h3>
@@ -193,6 +210,7 @@
           <button class="btn btn-sm btn-danger" id="resetStatsBtn">Reset</button>
         </div>
       </div>
+      </div><!-- /settingsControls -->
       <div class="footer">
         Supports 47+ CMP frameworks
         <span class="footer-sep">|</span>

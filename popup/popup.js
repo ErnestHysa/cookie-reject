@@ -40,7 +40,8 @@
 
   function escapeHTML(str) {
     if (!str) return '';
-    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
   function renderActivityItems(entries) {
@@ -88,6 +89,31 @@
       toast.classList.remove('show');
       setTimeout(() => toast.remove(), 300);
     }, 2000);
+  }
+
+  // CQ-1: Extract shared search/filter function
+  function filterActivityEntries(entries, searchTerm) {
+    if (!searchTerm) return entries;
+    const term = searchTerm.toLowerCase();
+    return entries.filter(e =>
+      (e.domain || '').toLowerCase().includes(term) ||
+      (e.cmp || '').toLowerCase().includes(term)
+    );
+  }
+
+  // UX-5: Toast with undo button
+  function showToastWithUndo(message, undoFn) {
+    document.querySelectorAll('.toast').forEach(t => t.remove());
+    const toast = document.createElement('div');
+    toast.className = 'toast';
+    toast.innerHTML = '<span>' + escapeHTML(message) + '</span><button class="toast-undo">Undo</button>';
+    document.body.appendChild(toast);
+    toast.querySelector('.toast-undo').addEventListener('click', () => {
+      toast.remove();
+      undoFn();
+    });
+    requestAnimationFrame(() => requestAnimationFrame(() => toast.classList.add('show')));
+    setTimeout(() => { toast.classList.remove('show'); setTimeout(() => toast.remove(), 300); }, 4000);
   }
 
   // ─── Tab Management ────────────────────────────────────────────────
@@ -156,7 +182,22 @@
     $('masterToggle').addEventListener('change', async (e) => {
       await sendMessage({ type: 'UPDATE_SETTINGS', settings: { enabled: e.target.checked } });
       showToast(e.target.checked ? 'Extension enabled' : 'Extension disabled');
+      updateDisabledState(e.target.checked);
     });
+  }
+
+  function updateDisabledState(enabled) {
+    const settingsSection = $('settingsControls');
+    if (settingsSection) {
+      settingsSection.style.opacity = enabled ? '1' : '0.4';
+      settingsSection.style.pointerEvents = enabled ? 'auto' : 'none';
+    }
+    // Also update site-actions buttons
+    const siteActions = document.querySelector('.site-actions');
+    if (siteActions) {
+      siteActions.style.opacity = enabled ? '1' : '0.4';
+      siteActions.style.pointerEvents = enabled ? 'auto' : 'none';
+    }
   }
 
   // ─── Current Site ──────────────────────────────────────────────────
@@ -169,12 +210,14 @@
       // Disable action buttons on non-web pages (Fix #20)
       $('rejectNowBtn').disabled = true;
       $('whitelistBtn').disabled = true;
+      $('blacklistBtn').disabled = true;
       return;
     }
 
     // Re-enable buttons for valid web pages (Fix #20)
     $('rejectNowBtn').disabled = false;
     $('whitelistBtn').disabled = false;
+    $('blacklistBtn').disabled = false;
 
     $('siteDomain').textContent = tabInfo.domain;
 
@@ -190,6 +233,16 @@
     // Reset whitelist button for non-whitelisted sites (Fix #5)
     $('whitelistBtn').textContent = 'Whitelist';
     $('whitelistBtn').removeAttribute('data-action');
+
+    // UX-1: Check blacklist status
+    if (listCheck && listCheck.blacklisted) {
+      updateStatus('warning', 'Blacklisted');
+      $('blacklistBtn').textContent = 'Remove from Blacklist';
+      $('blacklistBtn').dataset.action = 'remove-blacklist';
+    } else {
+      $('blacklistBtn').textContent = 'Blacklist';
+      $('blacklistBtn').removeAttribute('data-action');
+    }
 
     // Check content script status
     const status = await sendTabMessage({ type: 'GET_STATUS_CONTENT' });
@@ -211,7 +264,7 @@
     } else {
       const elapsed = Date.now() - (status.timestamp || Date.now());
       if (elapsed < 15000) {
-        updateStatus('warning', 'Scanning...');
+        updateStatus('warning', 'Scanning for banners...');
       } else {
         updateStatus('inactive', 'No banner detected');
       }
@@ -269,6 +322,11 @@
     $('statUnique').textContent = stats.totalUniqueSites || 0;
     $('statVendors').textContent = stats.totalVendorsUnticked || 0;
     $('statTime').textContent = stats.timeSavedFormatted || '0s';
+
+    // UX-2: Today count
+    const todayLog = await sendMessage({ type: 'GET_LOG', limit: 500 });
+    const todayCount = (todayLog || []).filter(e => e.timestamp && (Date.now() - e.timestamp < 86400000)).length;
+    $('statToday').textContent = todayCount;
   }
 
   // ─── Activity ──────────────────────────────────────────────────────
@@ -287,16 +345,15 @@
       activityLimit += 30;
     }
 
-    const searchTerm = ($('activitySearch').value || '').trim().toLowerCase();
-    const filtered = searchTerm
-      ? _allActivityEntries.filter(e => (e.domain || '').toLowerCase().includes(searchTerm))
-      : _allActivityEntries;
+    const searchTerm = ($('activitySearch').value || '').trim();
+    const filtered = filterActivityEntries(_allActivityEntries, searchTerm);
 
     const visible = filtered.slice(0, activityLimit);
     const container = $('activityList');
 
     if (visible.length === 0) {
-      container.innerHTML = '<div class="empty-state">' + (_allActivityEntries.length === 0 ? 'No activity yet' : 'No matches') + '</div>';
+      container.innerHTML = '<div class="empty-state">' +
+        (_allActivityEntries.length === 0 ? 'No activity yet' : 'No matches for "' + escapeHTML(searchTerm) + '"') + '</div>';
       $('loadMoreBtn').style.display = 'none';
       return;
     }
@@ -379,15 +436,21 @@
     $('rejectNowBtn').addEventListener('click', async () => {
       $('rejectNowBtn').disabled = true;
       $('rejectNowBtn').textContent = 'Rejecting...';
-      await sendTabMessage({ type: 'FORCE_REJECT' });
-      // Wait a moment then refresh
-      setTimeout(async () => {
+      try {
+        const response = await sendTabMessage({ type: 'FORCE_REJECT' });
+        // Wait a moment then refresh
+        setTimeout(async () => {
+          $('rejectNowBtn').disabled = false;
+          $('rejectNowBtn').textContent = 'Reject Now';
+          await loadCurrentSite();
+          await loadStats();
+          await loadActivity();
+        }, 1500);
+      } catch (e) {
         $('rejectNowBtn').disabled = false;
         $('rejectNowBtn').textContent = 'Reject Now';
-        await loadCurrentSite();
-        await loadStats();
-        await loadActivity();
-      }, 1500);
+        showToast('Cannot reach this page (browser/extension page?)');
+      }
     });
 
     // Whitelist button
@@ -405,7 +468,39 @@
         await sendMessage({ type: 'ADD_TO_LIST', list: 'whitelist', domain: tabInfo.domain });
         $('whitelistBtn').textContent = 'Remove from Whitelist';
         $('whitelistBtn').dataset.action = 'remove-whitelist';
-        showToast('Added to whitelist');
+        // UX-5: undo toast for whitelist add
+        showToastWithUndo('Added to whitelist', async () => {
+          await sendMessage({ type: 'REMOVE_FROM_LIST', list: 'whitelist', domain: tabInfo.domain });
+          loadCurrentSite();
+        });
+      }
+      loadCurrentSite();
+    });
+  }
+
+  // UX-1: Blacklist button for current site
+  function initBlacklistBtn() {
+    $('blacklistBtn').addEventListener('click', async () => {
+      const action = $('blacklistBtn').dataset.action;
+      const tabInfo = await sendMessage({ type: 'GET_CURRENT_TAB_INFO' });
+      if (!tabInfo) return;
+
+      if (action === 'remove-blacklist') {
+        await sendMessage({ type: 'REMOVE_FROM_LIST', list: 'blacklist', domain: tabInfo.domain });
+        $('blacklistBtn').textContent = 'Blacklist';
+        $('blacklistBtn').removeAttribute('data-action');
+        showToastWithUndo('Removed from blacklist', async () => {
+          await sendMessage({ type: 'ADD_TO_LIST', list: 'blacklist', domain: tabInfo.domain });
+          loadCurrentSite();
+        });
+      } else {
+        await sendMessage({ type: 'ADD_TO_LIST', list: 'blacklist', domain: tabInfo.domain });
+        $('blacklistBtn').textContent = 'Remove from Blacklist';
+        $('blacklistBtn').dataset.action = 'remove-blacklist';
+        showToastWithUndo('Added to blacklist', async () => {
+          await sendMessage({ type: 'REMOVE_FROM_LIST', list: 'blacklist', domain: tabInfo.domain });
+          loadCurrentSite();
+        });
       }
       loadCurrentSite();
     });
@@ -423,6 +518,8 @@
     $('settingDismissOverlays').checked = settings.dismissOverlays;
     $('settingTCFApi').checked = settings.useTCFApi;
     $('settingDebug').checked = settings.debugMode;
+    $('settingDryRun').checked = settings.dryRun || false;
+    updateDisabledState(settings.enabled);
   }
 
   function initSettingsHandlers() {
@@ -432,6 +529,7 @@
       { id: 'settingDismissOverlays', key: 'dismissOverlays' },
       { id: 'settingTCFApi', key: 'useTCFApi' },
       { id: 'settingDebug', key: 'debugMode' },
+      { id: 'settingDryRun', key: 'dryRun' },
     ];
 
     for (const { id, key } of toggles) {
@@ -557,16 +655,72 @@
     });
   }
 
+  // ─── CSV Export (FEAT-3) ──────────────────────────────────────────
+
+  function exportCSV() {
+    sendMessage({ type: 'GET_LOG', limit: 500 }).then(log => {
+      if (!log || log.length === 0) { showToast('No data to export', true); return; }
+      const header = 'Domain,CMP,Vendors Unticked,Timestamp\n';
+      const rows = log.map(e => '"' + e.domain + '","' + (e.cmp || '') + '",' + (e.vendorsUnticked || 0) + ',"' + new Date(e.timestamp).toISOString() + '"').join('\n');
+      const blob = new Blob([header + rows], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'cookiereject-activity-' + new Date().toISOString().slice(0, 10) + '.csv';
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast('CSV exported');
+    });
+  }
+
+  // ─── Theme Toggle (FEAT-7) ──────────────────────────────────────
+
+  function toggleTheme() {
+    const html = document.documentElement;
+    const current = html.dataset.theme;
+    const next = current === 'light' ? 'dark' : 'light';
+    html.dataset.theme = next;
+    $('themeToggle').textContent = next === 'light' ? '☀️' : '🌙';
+    try {
+      chrome.storage.local.set({ theme: next });
+    } catch (e) { /* ignore */ }
+  }
+
+  function loadTheme() {
+    try {
+      chrome.storage.local.get('theme', (result) => {
+        if (result && result.theme) {
+          document.documentElement.dataset.theme = result.theme;
+          $('themeToggle').textContent = result.theme === 'light' ? '☀️' : '🌙';
+        }
+      });
+    } catch (e) { /* ignore */ }
+  }
+
   // ─── Event Handlers ────────────────────────────────────────────────
 
   function initEventHandlers() {
     initMasterToggle();
     initSiteActions();
+    initBlacklistBtn();
     initListHandlers();
     initSettingsHandlers();
     initResetStats();
     initClearLog();
     initImportExport();
+
+    // FEAT-3: CSV export
+    $('exportCsvBtn').addEventListener('click', exportCSV);
+
+    // FEAT-7: Theme toggle
+    $('themeToggle').addEventListener('click', toggleTheme);
+
+    // FEAT-5: Report undetected banner
+    $('reportBanner').addEventListener('click', () => {
+      const domain = $('siteDomain').textContent;
+      const url = `https://github.com/ErnestHysa/cookie-reject/issues/new?title=Undetected+banner+on+${encodeURIComponent(domain)}&body=${encodeURIComponent(`**URL:** ${domain}\n**Browser:** ${navigator.userAgent}\n**Extension version:** ${$('version').textContent}\n\n**Description:**\nPlease describe the banner and any relevant details about the website.`)}`;
+      chrome.tabs.create({ url });
+    });
 
     // Enter key on list inputs
     $('whitelistInput').addEventListener('keydown', (e) => {
@@ -584,14 +738,13 @@
       clearTimeout(_searchDebounce);
       _searchDebounce = setTimeout(() => {
         activityLimit = 30;
-        const searchTerm = ($('activitySearch').value || '').trim().toLowerCase();
-        const filtered = searchTerm
-          ? _allActivityEntries.filter(e => (e.domain || '').toLowerCase().includes(searchTerm))
-          : _allActivityEntries;
+        const searchTerm = ($('activitySearch').value || '').trim();
+        const filtered = filterActivityEntries(_allActivityEntries, searchTerm);
         const visible = filtered.slice(0, activityLimit);
         const container = $('activityList');
         if (visible.length === 0) {
-          container.innerHTML = '<div class="empty-state">' + (_allActivityEntries.length === 0 ? 'No activity yet' : 'No matches') + '</div>';
+          container.innerHTML = '<div class="empty-state">' +
+            (_allActivityEntries.length === 0 ? 'No activity yet' : 'No matches for "' + escapeHTML(searchTerm) + '"') + '</div>';
           $('loadMoreBtn').style.display = 'none';
           return;
         }
@@ -635,6 +788,7 @@
 
   async function init() {
     loadVersion();
+    loadTheme();
     initTabs();
     initEventHandlers();
     await Promise.all([

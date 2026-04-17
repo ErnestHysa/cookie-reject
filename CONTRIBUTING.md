@@ -29,15 +29,21 @@ Found a site where CookieReject doesn't work? Open an issue with:
 
 ## Adding a New CMP Handler
 
-Each handler lives in `content.js` inside `CMPHandlers`. A handler needs:
+Handlers are registered via `registerHandler()` in `content.js`. You only need
+to update **one place** -- the registration call. The detector and selectors
+are auto-registered from the `opts` parameter.
 
 ```javascript
-newcmp: {
-  detect() {
-    // Return true if this CMP's banner is present and visible
-    return !!(document.getElementById('some-element'));
+registerHandler(
+  'mycmp',                    // unique ID (lowercase, no spaces)
+  'MyCMP Framework',          // human-readable name
+  function detect() {          // detection function
+    return !!(
+      document.getElementById('some-banner') ||
+      document.querySelector('.some-consent-popup')
+    );
   },
-  async reject() {
+  async function reject() {    // rejection function
     let rejected = 0;
     let vendorsUnticked = 0;
     // 1. Try "Reject All" button
@@ -45,23 +51,53 @@ newcmp: {
     // 3. Return { rejected, vendorsUnticked }
     return { rejected, vendorsUnticked };
   },
-},
+  {
+    // REQUIRED: selectors for primary detection (comma-separated)
+    selectors: '#some-banner, .some-consent-popup',
+    // REQUIRED: fast check for CMPDetector.detect()
+    detectCheck: () =>
+      document.getElementById('some-banner') ||
+      document.querySelector('.some-consent-popup'),
+  }
+);
 ```
 
-Also add the detector to the `detectors` array in `CMPDetector.detect()`.
+### Using Handler Helpers
+
+For common rejection patterns, use `HandlerHelpers.standardReject()`:
+
+```javascript
+async function reject() {
+  return HandlerHelpers.standardReject({
+    rejectTexts: ['reject all', 'reject', 'decline'],
+    prefsTexts: ['manage preferences', 'customize'],
+    containerSelector: '#some-banner',
+    saveTexts: ['save preferences', 'confirm choices'],
+  });
+}
+```
+
+### Handler Checklist
+
+- [ ] `id` is unique and lowercase
+- [ ] `detect()` checks both element existence AND visibility
+- [ ] `reject()` returns `{ rejected: number, vendorsUnticked: number }`
+- [ ] `selectors` targets the visible banner element (not a persistent wrapper)
+- [ ] `detectCheck` matches what `detect()` looks for
+- [ ] Tested on at least one real site
 
 ## Testing
 
-There are no automated tests (the extension interacts with live websites).
-Test manually:
+Run unit tests with:
+
+```bash
+node tests/test-utils.js
+```
+
+Manual testing:
 
 1. Load the extension unpacked in your browser
 2. Visit sites known to use the CMP you're targeting
 3. Verify auto-detection works (banner appears and gets rejected)
-4. Verify manual "Reject Now" works
-5. Verify stats increment correctly
-6. Verify no false positives on pages without banners
-
-## License
-
-By contributing, you agree that your contributions will be licensed under the MIT License.
+4. Check the popup dashboard for correct stats
+5. Test the "Reject Now" manual trigger

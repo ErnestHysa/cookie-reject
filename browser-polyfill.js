@@ -21,24 +21,19 @@
     // Firefox environment -- browser.* is the native API
     // Alias the entire namespace so all chrome.* calls work
     window.chrome = browser;
-    return;
   }
 
-  // If both exist (some Firefox versions have both), ensure chrome.action exists
-  // In Firefox, chrome.action may be undefined while browser.action works
+  // If both exist (some Firefox versions have both), ensure all APIs are available
   if (typeof chrome !== 'undefined' && typeof browser !== 'undefined') {
-    // Firefox with both namespaces -- fill in any gaps
-    if (!chrome.action && browser.action) {
-      chrome.action = browser.action;
+    const apis = ['action', 'tabs', 'runtime', 'storage', 'alarms', 'scripting', 'offscreen', 'declarativeNetRequest'];
+    for (const api of apis) {
+      if (!chrome[api] && browser[api]) chrome[api] = browser[api];
     }
-    if (!chrome.tabs && browser.tabs) {
-      chrome.tabs = browser.tabs;
-    }
-    if (!chrome.runtime && browser.runtime) {
-      chrome.runtime = browser.runtime;
-    }
-    if (!chrome.storage && browser.storage) {
-      chrome.storage = browser.storage;
+    // Deep-clone storage areas
+    if (chrome.storage && browser.storage) {
+      if (!chrome.storage.sync && browser.storage.sync) chrome.storage.sync = browser.storage.sync;
+      if (!chrome.storage.local && browser.storage.local) chrome.storage.local = browser.storage.local;
+      if (!chrome.storage.session && browser.storage.session) chrome.storage.session = browser.storage.session;
     }
   }
 

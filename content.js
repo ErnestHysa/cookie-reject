@@ -51,6 +51,11 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     }
   }
   if (window !== window.top) {
+    // Skip non-HTTP iframes (PDF viewers, about:blank, extension pages)
+    try {
+      const proto = window.location.protocol;
+      if (proto !== 'http:' && proto !== 'https:') return;
+    } catch { return; }
     // We're in an iframe. Run a lightweight scan for known CMP iframes
     // (Sourcepoint, TrustArc portal, etc.) but skip full engine init.
     const _isCMPFrame = (() => {
@@ -72,9 +77,14 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
           document, 'button, a'
         );
         if (rejectBtns.length > 0) {
-          _ifrUtils.clickFirstMatching(rejectBtns, [
-            'reject all', 'reject', 'decline', 'refuse', 'opt out', 'do not consent'
-          ]);
+          // Click the first button matching reject-priority texts
+          const priorityTexts = ['reject all', 'reject', 'decline', 'refuse', 'opt out', 'do not consent'];
+          for (const txt of priorityTexts) {
+            const match = rejectBtns.find(btn =>
+              (btn.textContent || '').trim().toLowerCase().includes(txt)
+            );
+            if (match) { match.click(); break; }
+          }
         }
       } catch (e) { /* iframe rejection failed silently */ }
     }, 2000);
@@ -114,6 +124,10 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     observerTimeout: 35000,
     // Max time to wait for settings to load before proceeding (ms)
     settingsWaitTimeout: 2000,
+    // Delay for handlers to wait for CMP UI to settle (ms)
+    handlerWaitDelay: 800,
+    // Top CMPs to check first on observer ticks (most common globally)
+    topCMPs: ['onetrust', 'didomi', 'cookieyes', 'usercentrics', 'sourcepoint'],
   };
 
   // ─── Utility helpers ────────────────────────────────────────────────
@@ -125,6 +139,11 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
      */
     isVisible(el) {
       if (!el) return false;
+      // Fast path: if element has layout and non-zero size, it's likely visible.
+      // This avoids the expensive getComputedStyle call for the majority of elements.
+      if (el.offsetHeight > 0 && el.offsetWidth > 0 && el.offsetParent !== null) {
+        return true;
+      }
       // offsetParent is null for display:none and position:fixed elements.
       // For position:fixed, we still need to check visibility/opacity below.
       const style = getComputedStyle(el);
@@ -196,7 +215,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
      * Caches the querySelectorAll result for 2 seconds to avoid repeated
      * full-DOM scans during the same detection cycle.
      */
-    findAllByText(texts, root = document, tag = '*') {
+    findAllByText(texts, root = document, tag = 'button, a, span, input, label') {
       if (!texts || texts.length === 0) return [];
       const results = [];
       // Pre-lowercase all search texts for efficiency
@@ -247,12 +266,19 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       let toggles = Array.from(container.querySelectorAll(toggleSelector));
 
       // Also pierce Shadow DOM (custom web components like <xtx-checkbox>)
-      container.querySelectorAll('*').forEach(el => {
-        if (el.shadowRoot) {
-          const shadowToggles = el.shadowRoot.querySelectorAll(toggleSelector);
+      // PERF-3: Use a WeakMap cache to avoid re-scanning the same elements
+      if (!Utils._shadowRootCache) Utils._shadowRootCache = new WeakMap();
+      const walker = document.createTreeWalker(container, NodeFilter.SHOW_ELEMENT);
+      let node;
+      while ((node = walker.nextNode())) {
+        if (node.shadowRoot) {
+          if (!Utils._shadowRootCache.has(node)) {
+            Utils._shadowRootCache.set(node, true);
+          }
+          const shadowToggles = node.shadowRoot.querySelectorAll(toggleSelector);
           shadowToggles.forEach(t => toggles.push(t));
         }
-      });
+      }
 
       let count = 0;
 
@@ -278,7 +304,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         toggle.click();
         count++;
 
-        // Small delay between toggles to not overwhelm the CMP
+        // Small delay every 20 toggles to give the CMP breathing room
         if (i % 20 === 19) await Utils.sleep(CONFIG.vendorToggleDelay);
       }
 
@@ -304,11 +330,12 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     /**
      * Scroll a container to load all lazy-loaded vendor items.
      */
-    async scrollToLoadAll(container, direction = 'down') {
+    async scrollToLoadAll(container, direction = 'down', signal = null) {
       let lastHeight = container.scrollHeight;
       let attempts = 0;
 
-      while (attempts < 50) {
+      while (attempts < 30) {
+        if (signal && signal.aborted) break;
         container.scrollTop = container.scrollHeight;
         await Utils.sleep(CONFIG.scrollDelay);
 
@@ -337,7 +364,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
 
     /**
      * Detect which CMP framework is running on the current page.
-     * Returns an object { id, name } or null.
+     * Returns an object { id, name, confidence } or null.
+     * Confidence: 'high' = element found, 'medium' = window global found,
+     *            'low' = partial match.
      */
     detect() {
       const now = Date.now();
@@ -345,33 +374,36 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         return this._lastDetection;
       }
       // Use auto-registered detectors from registerHandler() calls.
-      // If none registered (shouldn't happen), fall back to empty array.
       const detectors = _detectorEntries;
-
+      // Collect all matches with confidence scores, then pick best.
+      const matches = [];
 
       for (const detector of detectors) {
         try {
           const result = detector.check();
           if (result) {
-            // If the check returned a DOM element, verify it's actually visible.
-            // Many CMPs leave their banner element in the DOM but hidden
-            // (display:none) after the user has already consented. Without
-            // this check, we'd "detect" and "reject" an invisible banner,
-            // incrementing the stats counter on every page load.
             if (result instanceof HTMLElement && !Utils.isVisible(result)) {
               continue;
             }
-            const cached = { id: detector.id, name: detector.name };
-            this._lastDetection = cached;
-            this._lastDetectionTime = now;
-            return cached;
+            // Score: DOM element = high, truthy global = medium
+            const confidence = result instanceof HTMLElement ? 'high' : 'medium';
+            matches.push({ id: detector.id, name: detector.name, confidence });
           }
         } catch (e) { /* skip */ }
       }
 
+      // Pick best match: prefer 'high' confidence over 'medium'
+      if (matches.length > 0) {
+        matches.sort((a, b) => (a.confidence === 'high' ? 0 : 1) - (b.confidence === 'high' ? 0 : 1));
+        const best = matches[0];
+        this._lastDetection = best;
+        this._lastDetectionTime = now;
+        return best;
+      }
+
       // Fallback: generic detection based on common banner patterns
       if (CMPDetector.detectGeneric()) {
-        const cached = { id: 'generic', name: 'Generic' };
+        const cached = { id: 'generic', name: 'Generic', confidence: 'low' };
         this._lastDetection = cached;
         this._lastDetectionTime = now;
         return cached;
@@ -435,8 +467,13 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         '[id*="cookielaw"]', '[class*="cookielaworg"]',
       ];
 
-      for (const sel of bannerIndicators) {
-        const el = document.querySelector(sel);
+      // Batch selectors into a single query using :is() for better performance.
+      // Split into chunks of 10 to avoid exceeding CSS selector length limits.
+      const CHUNK = 10;
+      for (let i = 0; i < bannerIndicators.length; i += CHUNK) {
+        const chunk = bannerIndicators.slice(i, i + CHUNK);
+        const combined = ':is(' + chunk.join(',') + ')';
+        const el = document.querySelector(combined);
         if (el && Utils.isVisible(el)) return true;
       }
 
@@ -452,11 +489,16 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         this._shadowHostsTimestamp = Date.now();
       }
       for (const host of this._shadowHosts) {
-        for (const sel of bannerIndicators) {
-          const el = host.shadowRoot.querySelector(sel);
+        // Batch selectors into :is() groups of 10 (same pattern as light DOM scan)
+        for (let i = 0; i < bannerIndicators.length; i += CHUNK) {
+          const chunk = bannerIndicators.slice(i, i + CHUNK);
+          const combined = ':is(' + chunk.join(',') + ')';
+          const el = host.shadowRoot.querySelector(combined);
           if (el && Utils.isVisible(el)) return true;
         }
       }
+
+
 
       return false;
     },
@@ -475,6 +517,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   // Handlers are registered via registerHandler() for easy future
   // modularization. New CMPs can be added by calling
   // registerHandler(id, name, detectFn, rejectFn).
+
 
   const CMPHandlers = {};
 
@@ -500,6 +543,8 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
    */
   function registerHandler(id, name, detect, reject, opts) {
     CMPHandlers[id] = {
+      id,
+      name,
       detect,
       async reject() {
         try {
@@ -522,7 +567,74 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     }
   }
 
+  // ─── Common Handler Helpers ─────────────────────────────────────────
+  // These reduce duplication across the 47+ CMP handlers.
+  const HandlerHelpers = {
+    /**
+     * Standard reject flow: find reject button, click preferences, untick, save.
+     * @param {Object} opts
+     * @param {string|string[]} opts.rejectTexts - Texts for the reject button
+     * @param {string|string[]} [opts.prefsTexts] - Texts for preferences/customize button
+     * @param {string} [opts.containerSelector] - Selector for the CMP container
+     * @param {string} [opts.saveTexts] - Texts for the save/confirm button
+     * @returns {{rejected: number, vendorsUnticked: number}}
+     */
+    async standardReject({ rejectTexts, prefsTexts, containerSelector, saveTexts }) {
+      const texts = Array.isArray(rejectTexts) ? rejectTexts : [rejectTexts];
+      let rejected = 0;
+      let vendorsUnticked = 0;
+      const container = containerSelector
+        ? (document.querySelector(containerSelector) || document)
+        : document;
+
+      // 1. Try direct reject button
+      for (const text of texts) {
+        const btn = Utils.findByText(text, container, 'button, a, span');
+        if (btn) {
+          btn.click();
+          return { rejected: 1, vendorsUnticked: 0 };
+        }
+      }
+
+      // 2. Try opening preferences, then reject/untick/save
+      if (prefsTexts) {
+        const pTexts = Array.isArray(prefsTexts) ? prefsTexts : [prefsTexts];
+        for (const text of pTexts) {
+          const btn = Utils.findByText(text, container, 'button, a, span');
+          if (btn) {
+            btn.click();
+            await Utils.sleep(CONFIG.preRejectDelay);
+            break;
+          }
+        }
+        // Untick toggles
+        const modals = document.querySelectorAll(
+          '[role="dialog"], [class*="modal"], [class*="popup"], [class*="overlay"]'
+        );
+        for (const modal of modals) {
+          vendorsUnticked += await Utils.untickAllToggles(modal);
+        }
+        // Try reject-all again
+        for (const text of texts) {
+          const btn = Utils.findByText(text, document, 'button, a, span');
+          if (btn) { btn.click(); return { rejected: 1, vendorsUnticked }; }
+        }
+        // Try save button
+        if (saveTexts) {
+          const sTexts = Array.isArray(saveTexts) ? saveTexts : [saveTexts];
+          for (const text of sTexts) {
+            const btn = Utils.findByText(text, document, 'button, a');
+            if (btn) { btn.click(); return { rejected: 1, vendorsUnticked }; }
+          }
+        }
+      }
+
+      return { rejected, vendorsUnticked };
+    },
+  };
+
   // ──────────────── OneTrust ────────────────────────
+  /** OneTrust - API-first (OneTrustInterop), then DOM reject/prefs/save. #onetrust-banner-sdk */
   registerHandler('onetrust', 'OneTrust', function detect() {
     return !!(
       document.getElementById('onetrust-banner-sdk') ||
@@ -629,6 +741,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   });
 
   // ──────────────── Fides (ethyca) ────────────────────────
+  /** Fides (Ethyca) - Click reject/customize, untick, save. .fides-banner */
   registerHandler('fides', 'Fides (ethyca)', function detect() {
     return !!(
       document.getElementById('fides-banner-container') ||
@@ -719,6 +832,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   });
 
   // ──────────────── Ketch ────────────────────────
+  /** Ketch - Click reject/opt-out via API or DOM. #ketch-banner */
   registerHandler('ketch', 'Ketch', function detect() {
     return !!(
       document.getElementById('ketch-consent-banner') ||
@@ -798,6 +912,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   });
 
   // ──────────────── Cookiebot ────────────────────────
+  /** Cookiebot - Decline + preferences path to untick vendors. #CybotCookiebotDialog */
   registerHandler('cookiebot', 'Cookiebot', function detect() {
     return !!(
       document.getElementById('CybotCookiebotDialog') ||
@@ -872,6 +987,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   });
 
   // ──────────────── Didomi ────────────────────────
+  /** Didomi - Click disagree/purpose deny. #didomi-popup */
   registerHandler('didomi', 'Didomi', function detect() {
     return !!(
       document.getElementById('didomi-popup') ||
@@ -890,7 +1006,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       document.getElementById('didomi-notice-disagree-button') ||
       popup.querySelector('[id*="disagree"], [id*="reject"]') ||
       Utils.findByText('disagree', popup, 'button, a') ||
+
       Utils.findByText('reject all', popup, 'button, a');
+
     if (disagreeBtn) {
       disagreeBtn.click();
       rejected++;
@@ -909,6 +1027,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
 
       // Untick all purpose toggles
       const toggles = document.querySelectorAll(
+
         '#didomi-popup input[type="checkbox"], #didomi-popup [role="switch"]'
       );
       for (const toggle of toggles) {
@@ -954,6 +1073,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   });
 
   // ──────────────── Sourcepoint ────────────────────────
+  /** Sourcepoint - Click reject, handle multi-frame. .message-container */
   registerHandler('sourcepoint', 'Sourcepoint', function detect() {
     return !!(
       document.querySelector('[id^="sp_message_iframe"]') ||
@@ -1008,6 +1128,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   });
 
   // ──────────────── TrustArc ────────────────────────
+  /** TrustArc - API (truste.eu) then DOM reject. .truste-banner */
   registerHandler('trustarc', 'TrustArc', function detect() {
     return !!(
       document.getElementById('truste-consent-track') ||
@@ -1077,6 +1198,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   });
 
   // ──────────────── Quantcast ────────────────────────
+  /** Quantcast Choice - Click reject/purpose deny. .qc-cmp2-summary-buttons */
   registerHandler('quantcast', 'Quantcast', function detect() {
 
     return !!(
@@ -1143,6 +1265,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   });
 
   // ──────────────── Usercentrics ────────────────────────
+  /** Usercentrics - API (UC_UI) then DOM. #usercentrics-root */
   registerHandler('usercentrics', 'Usercentrics', function detect() {
     return !!(
 
@@ -1218,6 +1341,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   });
 
   // ──────────────── CookieYes ────────────────────────
+  /** CookieYes - standardReject. .cky-consent-bar */
   registerHandler('cookieyes', 'CookieYes', function detect() {
     return !!(
       document.getElementById('cky-btn-reject') ||
@@ -1225,58 +1349,19 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       document.querySelector('[data-cky-tag]')
     );
   }, async function reject() {
-    let rejected = 0;
-    let vendorsUnticked = 0;
-
-    // Click "Reject All"
-    const rejectBtn =
-      document.getElementById('cky-btn-reject') ||
-      document.querySelector('[data-cky-tag="reject-button"]') ||
-      Utils.findByText('reject all', document.querySelector('.cky-consent-bar') || document, 'button');
-    if (rejectBtn) {
-      rejectBtn.click();
-      rejected++;
-      return { rejected, vendorsUnticked };
-    }
-
-    // Open preferences
-    const prefsBtn =
-      document.querySelector('[data-cky-tag="settings-button"]') ||
-      Utils.findByText('manage', document.querySelector('.cky-consent-bar') || document, 'button');
-    if (prefsBtn) {
-      prefsBtn.click();
-      await Utils.sleep(CONFIG.dynamicLoadDelay);
-
-      const modal = document.querySelector('.cky-modal, [class*="cky-preference"]');
-      if (modal) {
-        const toggles = modal.querySelectorAll('input[type="checkbox"], input[role="switch"]');
-        for (const toggle of toggles) {
-          if (toggle.checked && !toggle.disabled) {
-            toggle.click();
-            rejected++;
-          }
-        }
-
-        const saveBtn =
-          modal.querySelector('[data-cky-tag="reject-button"], [data-cky-tag="save-button"]') ||
-          Utils.findByText('save preferences', modal, 'button') ||
-          Utils.findByText('save', modal, 'button') ||
-          Utils.findByText('confirm', modal, 'button') ||
-          Utils.findByText('reject all', modal, 'button');
-        if (saveBtn) {
-          saveBtn.click();
-          rejected++;
-        }
-      }
-    }
-
-    return { rejected, vendorsUnticked };
+    return HandlerHelpers.standardReject({
+      rejectTexts: ['reject all', 'reject', 'necessary only'],
+      prefsTexts: ['manage', 'customize', 'settings'],
+      containerSelector: '.cky-consent-bar',
+      saveTexts: ['save preferences', 'save', 'confirm', 'reject all'],
+    });
   }, {
     selectors: '#ckyBanner, .cky-banner',
     detectCheck: () => document.getElementById('ckyBanner') || document.querySelector('.cky-banner') || window.CkyConsent
   });
 
   // ──────────────── Iubenda ────────────────────────
+  /** Iubenda - Click reject/customize. .iubenda-cs-banner */
   registerHandler('iubenda', 'Iubenda', function detect() {
     return !!(
       document.querySelector('.iubenda-cs-banner') ||
@@ -1309,6 +1394,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   });
 
   // ──────────────── ConsentManager ────────────────────────
+  /** ConsentManager - Click reject/save via dialog. #cmpbox */
   registerHandler('consentmanager', 'ConsentManager', function detect() {
     return !!(
       document.getElementById('cmpbox') ||
@@ -1400,12 +1486,17 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     }
 
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '#cmpbox, #cmpwrapper, .cmpbox[role="dialog"]',
+    detectCheck: () => document.getElementById('cmpbox') || document.getElementById('cmpwrapper') || document.querySelector('.cmpbox[role="dialog"]') || window.__cmp || window.cmp
   });
 
   // ──────────────── Sirdata ────────────────────────
+  /** Sirdata - Click reject buttons. .sirdata-cmp */
   registerHandler('sirdata', 'Sirdata', function detect() {
     return !!(
       document.querySelector('[class*="sdrn-"]') ||
+
       document.getElementById('sd-cmp')
     );
   }, async function reject() {
@@ -1424,13 +1515,16 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       rejected++;
     }
 
+
     return { rejected, vendorsUnticked };
   }, {
+
     selectors: '#sd-cmp-dialog',
     detectCheck: () => document.querySelector('#sd-cmp-dialog') || document.querySelector('.sd-cmp') || window.SDDAN
   });
 
   // ──────────────── Ezoic ────────────────────────
+  /** Ezoic - Click reject/opt-out. #ez-consent-dialog */
   registerHandler('ezcookie', 'Ezoic', function detect() {
     return !!(
       document.querySelector('[class*="ez-cookie"]') ||
@@ -1460,6 +1554,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   });
 
   // ──────────────── Borlabs Cookie ────────────────────────
+  /** Borlabs Cookie - Click reject/customize/save. #BorlabsCookieBox */
   registerHandler('borlabs', 'Borlabs Cookie', function detect() {
     return !!(
       document.querySelector('#BorlabsCookieBox') ||
@@ -1517,6 +1612,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   });
 
   // ──────────────── LGCookiesLaw (PrestaShop) ────────────────────────
+  /** LGCookiesLaw (PrestaShop) - Click reject/save. #lgcookieslaw_banner */
   registerHandler('lgcookieslaw', 'LGCookiesLaw (PrestaShop)', function detect() {
     return !!(
       document.getElementById('lgcookieslaw_banner') ||
@@ -1573,9 +1669,13 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     }
 
     return { rejected, vendorsUnticked };
+  }, {
+    selectors: '#lgcookieslaw_banner, .lgcookieslaw-banner, [class*="lgcookieslaw"]',
+    detectCheck: () => document.getElementById('lgcookieslaw_banner') || document.querySelector('.lgcookieslaw-banner') || document.querySelector('[class*="lgcookieslaw"]')
   });
 
   // ──────────────── Complianz ────────────────────────
+  /** Complianz (WP) - Click reject/manage. #cmplz-cookiebanner */
   registerHandler('complianz', 'Complianz', function detect() {
     return !!(
 
@@ -1632,6 +1732,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   });
 
   // ──────────────── Cookie Notice (Humanityco) ────────────────────────
+  /** Cookie Notice (WP) - Click reject/decline. #cookie-notice */
   registerHandler('cookienotice', 'Cookie Notice', function detect() {
 
     return !!(
@@ -1664,6 +1765,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   });
 
   // ──────────────── Osano ────────────────────────
+  /** Osano - Click reject/customize. .osano-cm-dialog */
   registerHandler('osano', 'Osano', function detect() {
     return !!(
       document.querySelector('.osano-cm-dialog') ||
@@ -1692,6 +1794,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   });
 
   // ──────────────── Termly ────────────────────────
+  /** Termly - Click reject/customize. #termly-cookie-consent */
   registerHandler('termly', 'Termly', function detect() {
     return !!(
       document.querySelector('#termly-consent-content') ||
@@ -1722,6 +1825,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   });
 
   // ──────────────── Cookie Information ────────────────────────
+  /** Cookie Info - Click reject/decline. #cookieinfo */
   registerHandler('cookieinfo', 'Cookie Information', function detect() {
     return !!(
       document.querySelector('#coiOverlay') ||
@@ -1753,6 +1857,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   });
 
   // ──────────────── Real Cookie Banner ────────────────────────
+  /** Real Cookie Banner - Click reject/essential only. .rcb-banner */
   registerHandler('realcookiebanner', 'Real Cookie Banner', function detect() {
     return !!(
       document.querySelector('#real-cookie-banner') ||
@@ -1783,6 +1888,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   });
 
   // ──────────────── Moove GDPR ────────────────────────
+  /** Moove GDPR (WP) - Click reject/save. #moove_gdpr_cookie_modal */
   registerHandler('moovegdpr', 'Moove GDPR', function detect() {
     return !!(
       document.querySelector('#moove_gdpr_cookie_modal') ||
@@ -1846,6 +1952,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   });
 
   // ──────────────── CookieAdmin ────────────────────────
+  /** Cookie Admin - Click reject/customize. .cookie-admin-banner */
   registerHandler('cookieadmin', 'CookieAdmin', function detect() {
     return !!(
       document.querySelector('#cookieadmin-banner') ||
@@ -1877,6 +1984,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   });
 
   // ──────────────── Beautiful Cookie Consent ────────────────────────
+  /** Beautiful Cookie Banner - Click reject/customize. .bcb-banner */
   registerHandler('beautifulcookie', 'Beautiful Cookie Consent', function detect() {
     const el = document.querySelector('#ccc');
     if (el && (el.querySelector('.ccc-wrapper') || el.className.includes('ccc') || el.querySelector('[class*="cookie"]') || el.querySelector('button'))) return true;
@@ -1903,6 +2011,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     // Try reject button
     const rejectBtn =
       container.querySelector('[class*="reject"]') ||
+
       Utils.findByText('reject', container, 'button, a') ||
       Utils.findByText('only necessary', container, 'button, a') ||
       Utils.findByText('essential only', container, 'button, a');
@@ -1919,15 +2028,18 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     if (saveBtn) {
         saveBtn.click();
         rejected++;
+
       }
 
     return { rejected, vendorsUnticked };
+
   }, {
     selectors: '#ccc-icon, .ccc-wrapper',
     detectCheck: () => { const el = document.querySelector('#ccc'); if (el && (el.querySelector('.ccc-wrapper') || el.className.includes('ccc') || el.querySelector('[class*="cookie"]') || el.querySelector('button'))) return el; return document.querySelector('#ccc-icon') || document.querySelector('.ccc-wrapper'); }
   });
 
   // ──────────────── Pressidium Cookie Consent ────────────────────────
+  /** Pressidium CC - Click reject/customize. .pressidium-cookie-consent */
   registerHandler('pressidium', 'Pressidium', function detect() {
     return !!(
       document.querySelector('#pressidium-cc') ||
@@ -1956,6 +2068,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   });
 
   // ──────────────── WPLP Cookie Consent ────────────────────────
+  /** WP Libre Privacy - Click reject. #wplp-cookie-banner */
   registerHandler('wplpcookie', 'WPLP Cookie Consent', function detect() {
     return !!(
       document.querySelector('.gdpr-cookie-consent') ||
@@ -1984,6 +2097,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   });
 
   // ──────────────── Axeptio ────────────────────────
+  /** Axeptio - Click reject/all reject. #axeptio_overlay */
   registerHandler('axeptio', 'Axeptio', function detect() {
     return !!(
       document.querySelector('#axeptio_overlay') ||
@@ -2016,6 +2130,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   });
 
   // ──────────────── Admiral ────────────────────────
+  /** Admiral - Click reject/opt-out. .admiral-banner */
   registerHandler('admiral', 'Admiral', function detect() {
     return !!(
       document.querySelector('[class*="admiral"][class*="banner"]') ||
@@ -2047,6 +2162,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   });
 
   // ──────────────── Commanders Act ────────────────────────
+  /** Commanders Act - Click reject/purpose deny. #tc-privacy-wrapper */
   registerHandler('commandersact', 'Commanders Act', function detect() {
     return !!(
       document.querySelector('#tc-privacy-wrapper') ||
@@ -2076,6 +2192,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   });
 
   // ──────────────── CookieFirst ────────────────────────
+  /** CookieFirst - standardReject. .cookiefirst-banner */
   registerHandler('cookiefirst', 'CookieFirst', function detect() {
     return !!(
       document.querySelector('#cookiefirst-modal') ||
@@ -2084,30 +2201,17 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       typeof window.cookiefirst !== 'undefined'
     );
   }, async function reject() {
-
-    let rejected = 0;
-    let vendorsUnticked = 0;
-    const modal = document.querySelector('#cookiefirst-modal') ||
-                  document.querySelector('.cookiefirst');
-    if (!modal) return { rejected, vendorsUnticked };
-
-    const rejectBtn =
-      modal.querySelector('[class*="reject"]') ||
-      Utils.findByText('reject all', modal, 'button, a') ||
-      Utils.findByText('reject', modal, 'button, a') ||
-      Utils.findByText('necessary only', modal, 'button, a');
-    if (rejectBtn) {
-
-      rejectBtn.click();
-      rejected++;
-    }
-    return { rejected, vendorsUnticked };
+    return HandlerHelpers.standardReject({
+      rejectTexts: ['reject all', 'reject', 'necessary only'],
+      containerSelector: '#cookiefirst-modal, .cookiefirst',
+    });
   }, {
     selectors: '#cookiefirst-modal, .cookiefirst',
     detectCheck: () => document.querySelector('#cookiefirst-modal') || document.querySelector('.cookiefirst') || window.cookiefirst
   });
 
   // ──────────────── CookieHub ────────────────────────
+  /** CookieHub - standardReject. #cookiehub-dialog */
   registerHandler('cookiehub', 'CookieHub', function detect() {
     return !!(
       document.querySelector('#cookiehub-dialog') ||
@@ -2115,30 +2219,17 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       typeof window.cookiehub !== 'undefined'
     );
   }, async function reject() {
-    let rejected = 0;
-    let vendorsUnticked = 0;
-    const dialog = document.querySelector('#cookiehub-dialog') ||
-                   document.querySelector('.cookiehub');
-    if (!dialog) return { rejected, vendorsUnticked };
-
-    const rejectBtn =
-      dialog.querySelector('[class*="reject"]') ||
-      dialog.querySelector('[id*="reject"]') ||
-      Utils.findByText('reject all', dialog, 'button, a') ||
-      Utils.findByText('necessary only', dialog, 'button, a') ||
-      Utils.findByText('reject', dialog, 'button, a');
-    if (rejectBtn) {
-      rejectBtn.click();
-      rejected++;
-    }
-
-    return { rejected, vendorsUnticked };
+    return HandlerHelpers.standardReject({
+      rejectTexts: ['reject all', 'necessary only', 'reject'],
+      containerSelector: '#cookiehub-dialog, .cookiehub',
+    });
   }, {
     selectors: '#cookiehub-dialog, .cookiehub',
     detectCheck: () => document.querySelector('#cookiehub-dialog') || document.querySelector('.cookiehub') || window.cookiehub
   });
 
   // ──────────────── Gravito ────────────────────────
+  /** Gravito - Click reject/decline. .gravito-cmp */
   registerHandler('gravito', 'Gravito', function detect() {
     return !!(
       document.querySelector('.gravito-cmp') ||
@@ -2168,6 +2259,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   });
 
   // ──────────────── TRUENDO ────────────────────────
+  /** TRUENDO - Click reject/opt-out. [id*="truendo"] */
   registerHandler('truendo', 'TRUENDO', function detect() {
     return !!(
       document.querySelector('[id*="truendo"]') ||
@@ -2199,6 +2291,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   });
 
   // ──────────────── Clickio ────────────────────────
+  /** Clickio Consent - Click reject. #clickio-consent-dialog */
   registerHandler('clickio', 'Clickio', function detect() {
     return !!(
       document.querySelector('.clickio-cookie') ||
@@ -2227,6 +2320,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   });
 
   // ──────────────── AppConsent ────────────────────────
+  /** AppConsent (SFBX) - Click reject/customize. .appconsent */
   registerHandler('appconsent', 'AppConsent', function detect() {
     return !!(
       document.querySelector('[class*="appconsent"]') ||
@@ -2257,6 +2351,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   });
 
   // ──────────────── Cloudflare ────────────────────────
+  /** Cloudflare Zaraz CMP - Click reject. #cf-consent-banner */
   registerHandler('cloudflare', 'Cloudflare', function detect() {
     return !!(
       document.querySelector('#cf-cc-banner') ||
@@ -2286,6 +2381,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   });
 
   // ──────────────── Securiti ────────────────────────
+  /** Securiti - Click reject/manage. .securiti-banner */
   registerHandler('securiti', 'Securiti', function detect() {
     return !!(
       document.querySelector('[class*="securiti"]') ||
@@ -2316,6 +2412,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   });
 
   // ──────────────── Transcend ────────────────────────
+  /** Transcend Consent - Click do-not-sell/reject. .transcend-consent-manager */
   registerHandler('transcend', 'Transcend', function detect() {
     return !!(
       document.querySelector('[class*="transcend"]') ||
@@ -2347,6 +2444,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   });
 
   // ──────────────── CIVIC Cookie Control ────────────────────────
+  /** Civic Cookie Control - Click reject/opt-out. #ccc-icon */
   registerHandler('civic', 'CIVIC', function detect() {
     return !!(
       document.querySelector('[class*="civic-cookie"]') ||
@@ -2377,6 +2475,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   });
 
   // ──────────────── FastCMP ────────────────────────
+  /** FastCMP - Click reject. .fc-consent-root */
   registerHandler('fastcmp', 'FastCMP', function detect() {
     return !!(
       document.querySelector('[id*="fastcmp"]') ||
@@ -2404,7 +2503,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     detectCheck: () => document.querySelector('[id*="fastcmp"]') || document.querySelector('[class*="fastcmp"]') || window.FastCMP
   });
 
+
   // ──────────────── Lawwwing ────────────────────────
+  /** Lawwwing - Click reject. .lawwwing-banner */
   registerHandler('lawwwing', 'Lawwwing', function detect() {
     return !!(
       document.querySelector('[class*="lawwwing"]') ||
@@ -2434,6 +2535,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   });
 
   // ──────────────── AVACY ────────────────────────
+  /** Avacy - Click reject. .avacy-banner */
   registerHandler('avacy', 'AVACY', function detect() {
     return !!(
       document.querySelector('[class*="avacy"]') ||
@@ -2445,10 +2547,12 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     let vendorsUnticked = 0;
     const banner = document.querySelector('[class*="avacy"]') ||
                    document.querySelector('[id*="avacy"]');
+
     if (!banner) return { rejected, vendorsUnticked };
 
     const rejectBtn =
       banner.querySelector('[class*="reject"]') ||
+
       Utils.findByText('rifiuta', banner, 'button, a') ||
       Utils.findByText('rifiuta tutto', banner, 'button, a') ||
       Utils.findByText('reject', banner, 'button, a');
@@ -2463,6 +2567,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   });
 
   // ──────────────── Consentmo ────────────────────────
+  /** ConsentMo (Shopify) - Click reject. #cookie-consent-banner */
   registerHandler('consentmo', 'Consentmo', function detect() {
     return !!(
       document.querySelector('#cookie-consent-banner.consentmo') ||
@@ -2494,6 +2599,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   });
 
   // ──────────────── Pandectes ────────────────────────
+  /** Pandectes (Shopify) - Click reject. #pandectes-banner */
   registerHandler('pandectes', 'Pandectes', function detect() {
     return !!(
       document.querySelector('[class*="pandectes"]') ||
@@ -2523,6 +2629,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   });
 
   // ──────────────── Enzuzo ────────────────────────
+  /** Enzuzo - Click reject. .enzuzo-banner */
   registerHandler('enzuzo', 'Enzuzo', function detect() {
     return !!(
       document.querySelector('[class*="enzuzo"]') ||
@@ -2552,6 +2659,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   });
 
   // ──────────────── Cookie Script ────────────────────────
+  /** CookieScript - Click reject. #cookiescript_injected */
   registerHandler('cookiescript', 'Cookie Script', function detect() {
     return !!(
       document.querySelector('#cookiescript_injected') ||
@@ -2582,6 +2690,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
 
   // ──────────────── Generic (fallback) ────────────────────────
 
+  /** Generic fallback - Strategy: Keyword-based button search + overlay dismissal. 18 languages. */
   registerHandler('generic', 'Generic (fallback)', function detect() {
     return CMPDetector.detectGeneric();
   }, async function reject() {
@@ -2903,6 +3012,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
 
     // Last resort: more targeted close buttons -- require explicit
     // cookie/consent/privacy context to avoid closing unrelated UI.
+
     if (rejected === 0) {
       const closeBtns = document.querySelectorAll(
         '[class*="cookie-banner"] [aria-label="close"], ' +
@@ -2942,12 +3052,14 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
             window.__tcfapi('addEventListener', 2, (tcData, listenerSuccess) => {
               // Always remove our listener to prevent leaks
               try {
+
                 window.__tcfapi('removeEventListener', 2, () => {}, tcData.listenerId);
               } catch (e) { /* ignore */ }
               if (listenerSuccess && tcData.eventStatus === 'cmpuishown') {
                 success = true;
                 // Try programmatic rejection as supplement to button clicks
                 try {
+
                   if (typeof window.__tcfapi === 'function') {
                     window.__tcfapi('rejectAll', 2, () => {});
                   }
@@ -2957,10 +3069,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
             });
             // Timeout after 2s if CMP doesn't respond
             setTimeout(finish, 2000);
-          }, {
-    selectors: '#lgcookieslaw_banner, .lgcookieslaw-banner, [class*="lgcookieslaw"]',
-    detectCheck: () => document.getElementById('lgcookieslaw_banner') || document.querySelector('.lgcookieslaw-banner') || document.querySelector('[class*="lgcookieslaw"]')
-  });
+          });
         } catch (e) { /* ignore */ }
       }
 
@@ -3185,7 +3294,25 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         if (now - lastObserverDetect < CONFIG.observerThrottle) return; // throttle
         lastObserverDetect = now;
 
-        const cmp = CMPDetector.detect();
+        // PERF-2: Check top CMPs first (most common globally) before full scan.
+        // This avoids running all 47+ detectors on every observer tick.
+        let cmp = null;
+        const topDetectors = _detectorEntries.filter(d => CONFIG.topCMPs.includes(d.id));
+        for (const det of topDetectors) {
+          try {
+            const result = det.check();
+            if (result) {
+              if (result instanceof HTMLElement && !Utils.isVisible(result)) continue;
+              cmp = { id: det.id, name: det.name, confidence: result instanceof HTMLElement ? 'high' : 'medium' };
+              break;
+            }
+          } catch { /* skip */ }
+        }
+        // Only run full detection if top CMPs didn't match
+        if (!cmp) {
+          cmp = CMPDetector.detect();
+        }
+
         if (cmp) {
           this.observerActive = false;
           this.observer.disconnect();
@@ -3273,21 +3400,38 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         return;
       }
 
+      // FEAT-4: Dry run mode - log but don't click anything
+      if (this.settings.dryRun) {
+        DebugLog.log('[DRY RUN] Would reject', cmpInfo.name, 'on', this.getDomain());
+        // Still count as detected but not rejected
+        return;
+      }
 
-      const handler = CMPHandlers[cmpInfo.id];
+      // FEAT-1: Check for per-site CMP override
+      let cmp = cmpInfo;
+      try {
+        const override = await new Promise(r => chrome.runtime.sendMessage({ type: 'GET_CMP_OVERRIDE', domain: location.hostname }, resp => r(resp)));
+        if (override && override.override && override.override !== cmpInfo.id) {
+          DebugLog.log('CMP override:', cmpInfo.id, '->', override.override);
+          const overrideHandler = CMPHandlers[override.override];
+          if (overrideHandler) cmp = { id: override.override, name: overrideHandler.name, confidence: 'high' };
+        }
+      } catch { /* ignore */ }
+
+      const handler = CMPHandlers[cmp.id];
       if (!handler) return;
 
       // Verify detection
       if (!handler.detect()) return;
 
       // Verify the banner element is actually visible (not just the JS global)
-      if (!this.isCMPBannerVisible(cmpInfo.id)) {
-        DebugLog.log('CMP detected via global but banner not visible, skipping:', cmpInfo.name);
+      if (!this.isCMPBannerVisible(cmp.id)) {
+        DebugLog.log('CMP detected via global but banner not visible, skipping:', cmp.name);
         return;
       }
 
-      this.currentCMP = cmpInfo;
-      DebugLog.log('Detected CMP:', cmpInfo.name, 'on', this.getDomain());
+      this.currentCMP = cmp;
+      DebugLog.log('Detected CMP:', cmp.name, 'on', this.getDomain());
 
       this._handling = true;
       try {
@@ -3320,14 +3464,14 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         // (e.g. button existed in DOM but its JS event listener wasn't
         // attached yet). Re-detect the CMP to check if the banner is
         // still present and visible.
-        const stillVisible = this.isBannerStillVisible(cmpInfo);
+        const stillVisible = await this.isBannerStillVisible(cmp);
 
         if (stillVisible && result.rejected > 0) {
           // The handler claimed success but the banner is still there.
           // The click was a false positive -- the JS wasn't ready.
           // Don't mark as processed so the observer/interval can retry.
           this.lastFailedAttempt = Date.now();
-          const visibleSel = this._primarySelectors[cmpInfo.id] || 'unknown';
+          const visibleSel = this._primarySelectors[cmp.id] || 'unknown';
           DebugLog.warn('False positive -- banner still visible after rejection. Selector:', visibleSel);
           // Invalidate cache so retries get fresh detection
           CMPDetector.invalidateCache();
@@ -3347,14 +3491,14 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
             type: 'LOG_ACTION',
             data: {
               domain: domain,
-              cmp: cmpInfo.name,
+              cmp: cmp.name,
               rejected: result.rejected,
               vendorsUnticked: result.vendorsUnticked,
               timestamp: Date.now(),
               url: safeUrl,
             },
           });
-          DebugLog.log('Logged action:', domain, cmpInfo.name);
+          DebugLog.log('Logged action:', domain, cmp.name);
 
         }
       } catch (e) {
@@ -3395,7 +3539,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
      * Uses the handler's detect() method dynamically instead of a hardcoded
      * list of selectors -- so adding a new handler automatically updates this.
      */
-    isBannerStillVisible(cmpInfo) {
+    async isBannerStillVisible(cmpInfo) {
+      // Give the CMP time to process the rejection before re-checking
+      await Utils.sleep(500);
       const handler = CMPHandlers[cmpInfo.id];
       if (!handler || !handler.detect()) return false;
 
@@ -3406,6 +3552,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       if (cmpInfo.id === 'generic') {
         // detectGeneric() already checks isVisible, so if detect()
         // returned true, the banner IS visible.
+
         return true;
       }
 
@@ -3423,6 +3570,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
 
       const el = document.querySelector(sel);
       return el ? Utils.isVisible(el) : false;
+
     },
 
     getDomain() {
@@ -3430,6 +3578,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         const url = new URL(window.location.href);
         if (url.protocol !== 'http:' && url.protocol !== 'https:') {
           return url.href;
+
         }
         return url.hostname;
       } catch {
@@ -3527,14 +3676,24 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     if (location.href !== _lastUrl) {
       _lastUrl = location.href;
       DebugLog.log('SPA navigation detected, resetting engine');
+      // Tear down existing observer and interval to prevent duplicates
+      if (Engine.observerActive) {
+        Engine.observerActive = false;
+        try { Engine.observer.disconnect(); } catch { /* ignore */ }
+      }
+      if (Engine.intervalId) {
+        clearInterval(Engine.intervalId);
+        Engine.intervalId = null;
+      }
       // Reset detection state but keep settings/lists
       Engine.processed = false;
       Engine._detecting = false;
       Engine._handling = false;
       Engine._detectionResult = null;
-      // Clear cache so detectors re-run
+      // Clear caches so detectors re-run
       CMPDetector._lastDetection = null;
       CMPDetector._lastDetectionTime = 0;
+      Utils.clearTextCache();
       // Restart detection after a short delay for the new page to load
       setTimeout(() => {
         if (!Engine.processed && !Engine._isWhitelisted) {
@@ -3549,19 +3708,23 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   window.addEventListener('hashchange', checkSpaNavigation);
 
   // Monkey-patch pushState and replaceState to detect SPA-driven navigation
-  const _origPushState = history.pushState;
-  const _origReplaceState = history.replaceState;
-  if (_origPushState) {
-    history.pushState = function() {
-      _origPushState.apply(this, arguments);
-      checkSpaNavigation();
-    };
-  }
-  if (_origReplaceState) {
-    history.replaceState = function() {
-      _origReplaceState.apply(this, arguments);
-      checkSpaNavigation();
-    };
+  // Guard against re-patching if content script is injected multiple times
+  if (!history._cookieRejectPatched) {
+    history._cookieRejectPatched = true;
+    const _origPushState = history.pushState;
+    const _origReplaceState = history.replaceState;
+    if (_origPushState) {
+      history.pushState = function() {
+        _origPushState.apply(this, arguments);
+        checkSpaNavigation();
+      };
+    }
+    if (_origReplaceState) {
+      history.replaceState = function() {
+        _origReplaceState.apply(this, arguments);
+        checkSpaNavigation();
+      };
+    }
   }
 
   // ─── Start ──────────────────────────────────────────────────────────
@@ -3575,3 +3738,5 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     console.error('[CookieReject] Fatal error:', e);
   }
 })();
+
+

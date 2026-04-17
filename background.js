@@ -15,13 +15,18 @@
     self.chrome = browser;
   }
 
-  // If both exist (some Firefox versions have both), ensure chrome.action exists
-  // In Firefox, chrome.action may be undefined while browser.action works
+  // If both exist (some Firefox versions have both), ensure all APIs are available
   if (typeof chrome !== 'undefined' && typeof browser !== 'undefined') {
-    if (!chrome.action && browser.action) chrome.action = browser.action;
-    if (!chrome.tabs && browser.tabs) chrome.tabs = browser.tabs;
-    if (!chrome.runtime && browser.runtime) chrome.runtime = browser.runtime;
-    if (!chrome.storage && browser.storage) chrome.storage = browser.storage;
+    const apis = ['action', 'tabs', 'runtime', 'storage', 'alarms', 'scripting', 'offscreen', 'declarativeNetRequest'];
+    for (const api of apis) {
+      if (!chrome[api] && browser[api]) chrome[api] = browser[api];
+    }
+    // Deep-clone storage areas
+    if (chrome.storage && browser.storage) {
+      if (!chrome.storage.sync && browser.storage.sync) chrome.storage.sync = browser.storage.sync;
+      if (!chrome.storage.local && browser.storage.local) chrome.storage.local = browser.storage.local;
+      if (!chrome.storage.session && browser.storage.session) chrome.storage.session = browser.storage.session;
+    }
   }
 
   // If neither exists (unlikely, but defensive)
@@ -50,7 +55,7 @@
   const DEFAULT_STATS = {
     totalRejected: 0,
     totalVendorsUnticked: 0,
-    totalSitesProtected: 0,
+    totalBannersRejected: 0,
     totalUniqueSites: 0,
     installDate: null,
     lastResetDate: null,
@@ -64,6 +69,7 @@
     dismissOverlays: true,
     useTCFApi: true,
     debugMode: false,
+    dryRun: false,
   };
 
   const MAX_LOG_ENTRIES = 500;
@@ -351,7 +357,12 @@
   // ─── Whitelist / Blacklist ──────────────────────────────────────────
   const ListManager = {
     extractBaseDomain(hostname) {
-      if (!hostname) return '';
+      if (!hostname || typeof hostname !== 'string') return '';
+      hostname = hostname.trim().toLowerCase();
+      // Reject clearly invalid inputs (paths, protocols, spaces, special chars)
+      if (hostname.includes('/') || hostname.includes(' ') || hostname.includes('\\')) return '';
+      // Remove any trailing port or path that may have slipped in
+      hostname = hostname.replace(/[:?#].*$/, '');
       // Handle IP addresses (v4 and v6) -- return as-is
       if (/^[\d.:]+$/.test(hostname) || hostname === 'localhost') {
         return hostname;
@@ -387,7 +398,7 @@
 
     async getList(listName) {
       const key = listName === 'whitelist' ? STORAGE_KEYS.WHITELIST : STORAGE_KEYS.BLACKLIST;
-      return Storage.get(key, []);
+      return SyncStorage.get(key, []);
     },
 
     async setList(listName, list) {
@@ -486,36 +497,48 @@
   // ─── Unique Domain Tracker ─────────────────────────────────────────
   const UniqueDomainTracker = {
     _cache: null,
+    _dirty: false,
+    _flushTimer: null,
 
-    async _ensureCache() {
+    async _load() {
       if (!this._cache) {
         const domains = await Storage.get(STORAGE_KEYS.UNIQUE_DOMAINS, []);
         this._cache = new Set(domains);
       }
+      return this._cache;
     },
 
     async isNew(domain) {
-      await this._ensureCache();
-      return !this._cache.has(domain);
+      const cache = await this._load();
+      return !cache.has(domain);
     },
 
-
     async add(domain) {
-      return _storageQueue = _storageQueue.then(async () => {
-        await this._ensureCache();
-        if (this._cache.has(domain)) return false;
-        this._cache.add(domain);
-        await Storage.set(STORAGE_KEYS.UNIQUE_DOMAINS, [...this._cache]);
+      try {
+        const cache = await this._load();
+        if (cache.has(domain)) return false;
+        cache.add(domain);
+        this._dirty = true;
+        // Debounce writes: flush every 3 seconds if dirty
+        if (!this._flushTimer) {
+          this._flushTimer = setTimeout(async () => {
+            this._flushTimer = null;
+            if (this._dirty) {
+              this._dirty = false;
+              await Storage.set(STORAGE_KEYS.UNIQUE_DOMAINS, [...this._cache]);
+            }
+          }, 3000);
+        }
         return true;
-      }).catch(e => {
+      } catch (e) {
         console.error('UniqueDomainTracker.add failed:', e);
         return false;
-      });
+      }
     },
 
     async count() {
-      await this._ensureCache();
-      return this._cache.size;
+      const cache = await this._load();
+      return cache.size;
     },
   };
 
@@ -544,7 +567,7 @@
           return { valid: false, sanitizedValue: null };
         }
         // Explicitly check expected numeric fields
-        const numericFields = ['totalRejected', 'totalUniqueSites', 'totalVendorsUnticked', 'totalSitesProtected', 'cookiesRejected', 'bannersRejected', 'vendorsUnticked'];
+        const numericFields = ['totalRejected', 'totalUniqueSites', 'totalVendorsUnticked', 'totalBannersRejected', 'cookiesRejected', 'bannersRejected', 'vendorsUnticked'];
         for (const nf of numericFields) {
           if (value[nf] !== undefined && typeof value[nf] !== 'number') {
             return { valid: false, sanitizedValue: null };
@@ -629,12 +652,17 @@
         return { valid: true, sanitizedValue: value };
       }
 
-      // Unknown cr_ key: allow through with no special validation
-      return { valid: true, sanitizedValue: value };
+      // Unknown key: reject -- only known cr_ keys are accepted
+      return { valid: false, sanitizedValue: null };
     },
 
     async importData(jsonString) {
       try {
+        const jsonSize = jsonString.length;
+        if (jsonSize > 5 * 1024 * 1024) { // 5MB limit
+          return { success: false, error: 'Import file too large (max 5MB)' };
+        }
+
         const parsed = JSON.parse(jsonString);
         if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
           return { success: false, error: 'Invalid format: top-level value must be an object' };
@@ -706,7 +734,7 @@
           const stats = await StatsManager.increment({
             totalRejected: data.rejected || 0,
             totalVendorsUnticked: data.vendorsUnticked || 0,
-            totalSitesProtected: 1,
+            totalBannersRejected: 1,
             totalUniqueSites: isNewDomain ? 1 : 0,
           });
 
@@ -724,6 +752,66 @@
           debugLog('Action logged:', data.domain, data.cmp, 'new domain:', isNewDomain);
 
           return { success: true, stats };
+        }
+
+        case 'LOG_FAILED_REJECTION': {
+          const { data } = message;
+          debugLog('Failed rejection:', data.domain, data.cmp);
+          // Store failed rejections separately for analytics
+          const failStats = await Storage.get('cr_failed_rejections', []);
+          failStats.unshift({ domain: data.domain, cmp: data.cmp, timestamp: Date.now(), reason: data.reason });
+          if (failStats.length > 100) failStats.length = 100;
+          await Storage.set('cr_failed_rejections', failStats);
+          return { success: true };
+        }
+
+        case 'GET_FAILED_REJECTIONS': {
+          return await Storage.get('cr_failed_rejections', []);
+        }
+
+        case 'REJECT_CONSENT_MODE': {
+          // Inject consent mode rejection into the tab
+          try {
+            const tabs = await new Promise(resolve => {
+              chrome.tabs.query({ active: true, currentWindow: true }, resolve);
+            });
+            if (tabs[0]) {
+              await new Promise((resolve, reject) => {
+                try {
+                  chrome.scripting.executeScript({
+                    target: { tabId: tabs[0].id },
+                    func: () => {
+                      if (typeof gtag === 'function') {
+                        gtag('consent', 'update', {
+                          analytics_storage: 'denied',
+                          ad_storage: 'denied',
+                          ad_user_data: 'denied',
+                          ad_personalization: 'denied',
+                          functionality_storage: 'denied',
+                          personalization_storage: 'denied',
+                          security_storage: 'granted',
+                        });
+                      }
+                      if (typeof dataLayer !== 'undefined' && Array.isArray(dataLayer)) {
+                        dataLayer.push({ event: 'consent_update', consent_type: 'rejected' });
+                      }
+                    }
+                  }, () => {
+                    if (chrome.runtime.lastError) {
+                      resolve({ success: false });
+                      return;
+                    }
+                    resolve({ success: true });
+                  });
+                } catch (e) {
+                  resolve({ success: false });
+                }
+              });
+            }
+          } catch (e) {
+            debugLog('REJECT_CONSENT_MODE failed:', e.message);
+          }
+          return { success: false };
         }
 
         // ── Stats ──
@@ -846,6 +934,27 @@
           });
         }
 
+        // ── Per-site CMP Override ──
+        case 'SET_CMP_OVERRIDE': {
+          return _storageQueue = _storageQueue.then(async () => {
+            const meta = await Storage.get(STORAGE_KEYS.META, {});
+            if (!meta.cmpOverrides) meta.cmpOverrides = {};
+            if (message.handlerId === null) {
+              delete meta.cmpOverrides[message.domain];
+            } else {
+              meta.cmpOverrides[message.domain] = message.handlerId;
+            }
+            await Storage.set(STORAGE_KEYS.META, meta);
+            return { success: true };
+          }).catch(e => ({ success: false, error: e.message }));
+        }
+
+        case 'GET_CMP_OVERRIDE': {
+          const meta = await Storage.get(STORAGE_KEYS.META, {});
+          const override = (meta.cmpOverrides || {})[message.domain];
+          return { override: override || null };
+        }
+
         // ── Version info ──
         case 'GET_VERSION': {
           return { version: APP_VERSION };
@@ -880,12 +989,28 @@
 
   // ─── Badge Management ───────────────────────────────────────────────
   let _badgeUpdateTimer = null;
-  const _tabStates = {}; // tabId -> { rejected: bool, cmp: string }
+  // Persist tab states to session storage so they survive SW restarts
+  const _tabStates = {};
+  async function _loadTabStates() {
+    try {
+      if (chrome.storage.session) {
+        const data = await chrome.storage.session.get('_tabStates');
+        if (data._tabStates) Object.assign(_tabStates, data._tabStates);
+      }
+    } catch { /* session storage not available */ }
+  }
+  async function _saveTabStates() {
+    try {
+      if (chrome.storage.session) {
+        await chrome.storage.session.set({ _tabStates });
+      }
+    } catch { /* ignore */ }
+  }
 
   const Badge = {
     async update() {
       const stats = await StatsManager.get();
-      const count = stats.totalSitesProtected || 0;
+      const count = stats.totalBannersRejected || 0;
       const text = count > 0 ? String(count > 999 ? '999+' : count) : '';
 
       try {
@@ -899,6 +1024,7 @@
     // Set per-tab badge color to indicate rejection status
     async setTabState(tabId, rejected, cmp) {
       _tabStates[tabId] = { rejected, cmp };
+      _saveTabStates(); // fire-and-forget persist
       try {
         if (rejected) {
           chrome.action.setBadgeBackgroundColor({ color: '#4CAF50', tabId }); // green = rejected
@@ -923,6 +1049,7 @@
   });
 
   // ─── Initialize ─────────────────────────────────────────────────────
+  _loadTabStates();
   Migration.run().catch(e => console.error('Migration failed:', e));
   Badge.update().catch(e => console.error('Badge update failed:', e));
   loadDebugMode().catch(e => console.error('Debug mode load failed:', e));
@@ -966,10 +1093,53 @@
     }
   }
 
-  // Run update check on initialization and daily via alarm
+  // ─── Remote Rules Foundation ────────────────────────────────────────
+  // Future: fetch updated selector/detection rules from GitHub repo.
+  // Format: { version: 1, rules: [{ id, selectors, detectCheck }] }
+  // Stored in cr_meta.remoteRules for content script to pick up.
+  const RULES_URL = `https://raw.githubusercontent.com/${UPDATE_REPO}/main/rules.json`;
+  const RULES_FETCH_INTERVAL = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+  async function fetchRemoteRules() {
+    try {
+      const meta = await Storage.get(STORAGE_KEYS.META, {});
+      const lastFetch = meta.lastRulesFetch || 0;
+      if (Date.now() - lastFetch < RULES_FETCH_INTERVAL) return;
+
+      const response = await fetch(RULES_URL, {
+        headers: { 'Accept': 'application/json' },
+      });
+      if (!response.ok) return;
+
+      const data = await response.json();
+      if (data && data.version === 1 && Array.isArray(data.rules)) {
+        // Validate each rule has expected structure
+        const validRules = data.rules.filter(rule => {
+          return rule && typeof rule.id === 'string' &&
+            (Array.isArray(rule.selectors) || typeof rule.detectCheck === 'function' || typeof rule.detectCheck === 'string');
+        });
+        if (validRules.length !== data.rules.length) {
+          debugLog(`Filtered ${data.rules.length - validRules.length} invalid remote rules`);
+        }
+        data.rules = validRules;
+        meta.remoteRules = data;
+        meta.lastRulesFetch = Date.now();
+        await Storage.set(STORAGE_KEYS.META, meta);
+        debugLog(`Fetched ${data.rules.length} remote rules`);
+      }
+    } catch (e) {
+      debugLog('Remote rules fetch failed:', e.message);
+    }
+  }
+
+  fetchRemoteRules();
+
+  // Run update check on initialization and daily via alarm (if available)
   checkForUpdates();
-  chrome.alarms.create('checkUpdates', { periodInMinutes: 24 * 60 });
-  chrome.alarms.onAlarm.addListener((alarm) => {
-    if (alarm.name === 'checkUpdates') checkForUpdates();
-  });
+  if (chrome.alarms) {
+    chrome.alarms.create('checkUpdates', { periodInMinutes: 24 * 60 });
+    chrome.alarms.onAlarm.addListener((alarm) => {
+      if (alarm.name === 'checkUpdates') checkForUpdates();
+    });
+  }
 })();

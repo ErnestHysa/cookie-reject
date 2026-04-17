@@ -2,6 +2,50 @@
 
 All notable changes to CookieReject will be documented in this file.
 
+## [2.1.0] - 2025-04-17
+
+### Fixed
+- Fixed SPA navigation cleanup not clearing Engine.intervalId (BUG-1)
+- Fixed shadow DOM scan in detectGeneric() using individual selectors instead of `:is()` batches (BUG-2)
+- Added missing detectCheck opts for consentmanager and lgcookieslaw handlers
+- Fixed ListManager reading from local storage instead of SyncStorage (CQ-5)
+- Fixed misleading vendor toggle delay comment (ROB-3)
+
+### Added
+- **Smart Observer Scanning**: Top 5 most common CMPs checked first on MutationObserver ticks, full scan only as fallback (PERF-2)
+- **Shadow Root Cache**: WeakMap cache for shadow DOM scanning to avoid re-scanning known elements (PERF-3)
+- **Narrowed findAllByText**: Default tag parameter changed from '*' to interactive elements only (PERF-1)
+- **Interruptible Scroll**: scrollToLoadAll now accepts an AbortSignal and capped at 30 iterations (ROB-4)
+- **Banner Re-check Delay**: 500ms delay before verifying banner visibility after rejection (ROB-1)
+- **JSDoc on all 47 handlers**: Each handler now has documentation describing strategy and targets (CQ-4)
+- **Handler Wait Delay Config**: New `handlerWaitDelay` and `topCMPs` CONFIG entries (CQ-3)
+- **Import Size Limit**: 5MB max on imported JSON data (SEC-2)
+- **Remote Rules Validation**: Fetched rules are validated for correct structure before storage (SEC-3)
+- **Blacklist Button**: Added blacklist current-site button in popup dashboard (UX-1)
+- **Today's Stats**: Shows today's rejection count below the stats grid (UX-2)
+- **Scanning Message**: Improved scanning status message (UX-3)
+- **Search Feedback**: Activity search shows search term when no matches found (UX-4)
+- **Undo Toast**: Whitelist/blacklist additions show undo toast (UX-5)
+- **Dark/Light Theme**: Theme toggle button in popup header, persisted via storage (FEAT-7)
+- **CSV Export**: Export activity log as CSV file (FEAT-3)
+- **Failed Rejection Tracking**: New LOG_FAILED_REJECTION message handler (FEAT-2)
+- **Google Consent Mode**: Injects gtag consent denial via scripting API (FEAT-6)
+- **Per-Site CMP Override**: Override which handler is used for a specific domain (FEAT-1)
+- **Dry Run Mode**: New setting to detect but not reject banners (FEAT-4)
+- **Report Undetected Banner**: Link to pre-filled GitHub issue (FEAT-5)
+- **Unified Polyfill**: browser-polyfill.js now matches background.js inline polyfill (ARCH-3)
+- **Remote Rules Placeholder**: rules.json created for future remote rule updates (ARCH-4)
+- **Shared Search Filter**: Extracted filterActivityEntries() to deduplicate popup.js logic (CQ-1)
+- **Integration Test Framework**: Puppeteer-based test structure (TEST-3)
+
+### Changed
+- Content.js confidence scoring added to CMPDetector.detect() results
+- Badge update timer and tab state persistence improvements
+- Multiple handler functions now use HandlerHelpers.standardReject()
+
+### Removed
+- Empty `assets/` directory (ARCH-2)
+
 ## [2.0.0] - 2026-04-15
 
 ### Major Changes

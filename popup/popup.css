@@ -46,6 +46,7 @@ body {
   justify-content: space-between;
   padding: 14px 18px;
   border-bottom: 1px solid var(--border);
+  gap: 8px;
 }
 
 .header-left {
@@ -189,6 +190,14 @@ body {
 .tab-content {
   display: none;
   padding: 14px 18px;
+}
+
+#settingsControls {
+  transition: opacity 0.2s ease;
+}
+
+.site-actions {
+  transition: opacity 0.2s ease;
 }
 
 .tab-content.active {
@@ -513,6 +522,7 @@ body {
 .data-actions {
   display: flex;
   gap: 8px;
+  flex-wrap: wrap;
 }
 
 /* ─── Settings ─── */
@@ -644,4 +654,87 @@ body {
   display: flex;
   gap: 8px;
   justify-content: center;
+}
+
+/* ─── Stats Today (UX-2) ─── */
+.stats-today {
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 8px;
+  padding: 4px 0;
+}
+
+/* ─── Icon Button (FEAT-7) ─── */
+.btn-icon {
+  background: none;
+  border: none;
+  font-size: 16px;
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+  transition: background 0.15s;
+  line-height: 1;
+}
+.btn-icon:hover {
+  background: var(--bg-hover);
+}
+
+/* ─── Toast Undo (UX-5) ─── */
+.toast {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  pointer-events: auto;
+}
+.toast-undo {
+  background: rgba(255,255,255,0.2);
+  border: 1px solid rgba(255,255,255,0.4);
+  color: white;
+  padding: 2px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+}
+.toast-undo:hover {
+  background: rgba(255,255,255,0.35);
+}
+
+/* ─── Light Theme (FEAT-7) ─── */
+[data-theme="light"] {
+  --bg: #f5f6fa;
+  --bg-card: #ffffff;
+  --bg-hover: #eef0f5;
+  --bg-input: #eceef3;
+  --text: #2c3e50;
+  --text-dim: #6b7c93;
+  --text-muted: #95a5b8;
+  --accent: #3b7dd8;
+  --accent-hover: #2e6bc4;
+  --green: #27ae60;
+  --red: #e74c3c;
+  --orange: #f39c12;
+  --border: #dce1e8;
+}
+
+[data-theme="light"] .site-details {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+[data-theme="light"] .modal-overlay {
+  background: rgba(0, 0, 0, 0.25);
+}
+
+[data-theme="light"] .activity-cmp {
+  background: #e8ebf0;
+}
+
+[data-theme="light"] .toast-undo {
+  background: rgba(0,0,0,0.1);
+  border-color: rgba(0,0,0,0.2);
+  color: inherit;
+}
+[data-theme="light"] .toast-undo:hover {
+  background: rgba(0,0,0,0.2);
 }

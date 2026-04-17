@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "updated": "2025-04-17",
+  "rules": [],
+  "description": "Remote detection rules for CookieReject. Fetched by the extension weekly to update CMP selectors without a full extension update."
+}

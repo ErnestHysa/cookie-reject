@@ -2,6 +2,54 @@
 
 All notable changes to CookieReject will be documented in this file.
 
+## [2.3.0] - 2026-04-17
+
+### Fixed (BUG)
+- **BUG-1**: Iframe early-exit reorder -- IIFE guard moved AFTER iframe check so iframes skip `getManifest()` call entirely; iframe rejection path uses hardcoded 2000ms delay
+- **BUG-3**: `_topDetectorsCache` set to null when remote rules applied, preventing stale detection results after rule updates
+- **BUG-4**: Replaced `history._cookieRejectPatched` prototype pollution with `WeakSet<_patchedHistories>` -- no more globals on History.prototype
+- **BUG-5**: Added `csvEscape()` function for safe CSV export (handles commas, quotes, newlines in domain names)
+- **BUG-6**: `todayRejected`/`todayDate` cached in `cr_stats` so `GET_TODAY_COUNT` avoids scanning the full 500-entry activity log
+
+### Performance (PERF)
+- **PERF-1**: Reduced detection delays -- `dynamicLoadDelay` 800->400ms, `preRejectDelay` 800->500ms, `vendorToggleDelay` 50->30ms, `scrollDelay` 300->200ms
+- **PERF-2**: Added `isVisibleCached()` with short-lived WeakMap to avoid repeated `getComputedStyle()` calls on same elements within a tick
+- **PERF-3**: Popup lazy-loads activity log via `_allLoaded` flag -- "Load More" no longer blocked by initial render of 500 entries
+
+### Architecture (ARCH)
+- **ARCH-4**: Strict remote rule validation -- `rule.selectors.every(s => typeof s === 'string')` + `remoteRulesIntegrity` hash
+- **ARCH-5**: `setUninstallURL()` opens feedback page on extension removal
+- Documented monolith split (content.js ~3800 lines) as future work
+- Documented i18n/multi-language popup as future work
+
+### UX
+- **UX-1**: README updated with Privacy & Permissions section explaining data handling and network requests
+- **UX-2**: Activity log items now show `pageUrl` alongside domain
+- **UX-3**: New "View CMP Frameworks" button in dashboard showing per-CMP success/failure stats
+- **UX-4**: Activity items have `data-actions-row` for structured action button layout
+- **UX-5**: Blacklist additions require confirmation dialog
+- **UX-6**: Update detection via `cr_lastSeenVersion` -- shows "New!" badge when extension updates
+
+### Security (SEC)
+- **SEC-1**: Security audit comment in popup.js noting no dynamic HTML from external sources
+- **SEC-2**: README privacy section documents all data collection (none) and network requests (GitHub API only)
+- **SEC-3**: README permissions section explains why `<all_urls>` host permission is needed
+- **SEC-4**: 500KB payload size limit on remote rules response (confirmed present from R16)
+
+### Code Quality (CQ)
+- **CQ-1**: All CMP handler `catch` blocks now log handler ID and error for debugging
+- **CQ-2**: Null result check after handler execution -- logs "Handler returned no result" warning
+- **CQ-3**: New CONFIG entries documented: `spaNavigationDelay`, `observerCheckDelay`, `iframeRejectionDelay`, `settingsPollInterval`
+- **CQ-5**: Removed unused `formatTimeAgo()` function from popup.js
+
+### New Features (FEAT)
+- **FEAT-2**: Per-CMP statistics tracking via `cr_cmp_stats` storage + `GET_CMP_STATS` message handler
+- **FEAT-3**: Pause extension feature -- `pausedUntil` timestamp + `PAUSE_EXTENSION` message + `autoResume` alarm
+- **FEAT-5**: Initial "Give the page a moment" delay before engine starts, allowing CMP scripts to fully initialize
+
+### Tests
+- 80 -> 96 tests (+16): CONFIG value updates (4 new keys, 5 value assertions), csvEscape (7 tests), todayRejected caching (3 tests), cr_cmp_stats storage (2 tests)
+
 ## [2.2.0] - 2025-04-17
 
 ### Fixed

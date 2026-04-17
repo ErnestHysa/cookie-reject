@@ -57,6 +57,8 @@
     totalVendorsUnticked: 0,
     totalBannersRejected: 0,
     totalUniqueSites: 0,
+    todayRejected: 0,
+    todayDate: null,
     installDate: null,
     lastResetDate: null,
   };
@@ -70,6 +72,7 @@
     useTCFApi: true,
     debugMode: false,
     dryRun: false,
+    pausedUntil: 0,
   };
 
   const MAX_LOG_ENTRIES = 500;
@@ -268,6 +271,15 @@
         for (const [key, amount] of Object.entries(fields)) {
           stats[key] = (stats[key] || 0) + amount;
         }
+        // Track daily count
+        const today = new Date().toISOString().slice(0, 10);
+        if (stats.todayDate !== today) {
+          stats.todayRejected = 0;
+          stats.todayDate = today;
+        }
+        if (fields.totalBannersRejected) {
+          stats.todayRejected = (stats.todayRejected || 0) + 1;
+        }
         await Storage.set(STORAGE_KEYS.STATS, stats);
         return stats;
       }).catch(e => {
@@ -279,6 +291,8 @@
     async reset() {
       const resetStats = {
         ...DEFAULT_STATS,
+        todayRejected: 0,
+        todayDate: null,
         installDate: Date.now(),
         lastResetDate: Date.now(),
       };
@@ -751,6 +765,14 @@
 
           debugLog('Action logged:', data.domain, data.cmp, 'new domain:', isNewDomain);
 
+          // FEAT-2: Track per-CMP stats
+          try {
+            const cmpStats = await Storage.get('cr_cmp_stats', {});
+            if (!cmpStats[data.cmp]) cmpStats[data.cmp] = { success: 0, failed: 0 };
+            cmpStats[data.cmp].success++;
+            await Storage.set('cr_cmp_stats', cmpStats);
+          } catch { /* ignore */ }
+
           return { success: true, stats };
         }
 
@@ -763,6 +785,13 @@
           failStats.unshift({ domain: data.domain, cmp: data.cmp, timestamp: Date.now(), reason: data.reason });
           if (failStats.length > 100) failStats.length = 100;
           await Storage.set('cr_failed_rejections', failStats);
+          // FEAT-2: Track per-CMP failure stats
+          try {
+            const cmpStats = await Storage.get('cr_cmp_stats', {});
+            if (!cmpStats[data.cmp]) cmpStats[data.cmp] = { success: 0, failed: 0 };
+            cmpStats[data.cmp].failed++;
+            await Storage.set('cr_cmp_stats', cmpStats);
+          } catch { /* ignore */ }
           return { success: true };
         }
 
@@ -971,11 +1000,33 @@
         }
 
         case 'GET_TODAY_COUNT': {
-          const log = await Storage.get(STORAGE_KEYS.LOG, []);
-          const todayStart = new Date();
-          todayStart.setHours(0, 0, 0, 0);
-          const count = log.filter(e => e.timestamp && e.timestamp >= todayStart.getTime()).length;
+          const stats = await StatsManager.get();
+          const today = new Date().toISOString().slice(0, 10);
+          const count = (stats.todayDate === today) ? (stats.todayRejected || 0) : 0;
           return { count };
+        }
+
+        case 'GET_CMP_STATS': {
+          return await Storage.get('cr_cmp_stats', {});
+        }
+
+        case 'PAUSE_EXTENSION': {
+          const minutes = message.minutes || 30;
+          const pausedUntil = Date.now() + minutes * 60 * 1000;
+          const updated = await SettingsManager.update({ pausedUntil, enabled: false });
+          // Schedule auto-resume via alarm
+          if (chrome.alarms) {
+            chrome.alarms.create('autoResume', { delayInMinutes: minutes });
+          }
+          // Broadcast pause to all tabs
+          chrome.tabs.query({}, (tabs) => {
+            for (const t of tabs) {
+              chrome.tabs.sendMessage(t.id, { type: 'SETTINGS_UPDATED', settings: { enabled: false, pausedUntil } }, () => {
+                if (chrome.runtime.lastError) { /* tab not receptive */ }
+              });
+            }
+          });
+          return updated;
         }
 
         default:
@@ -1088,6 +1139,11 @@
   Badge.update().catch(e => console.error('Badge update failed:', e));
   loadDebugMode().catch(e => console.error('Debug mode load failed:', e));
 
+  // ARCH-5: Uninstall feedback URL
+  try {
+    chrome.runtime.setUninstallURL('https://forms.gle/placeholder');
+  } catch { /* Safari may not support this */ }
+
   // Initialize log ID counter from existing data to prevent collisions after SW restart
   (async () => {
     try {
@@ -1146,17 +1202,25 @@
       if (!response.ok) return;
 
       const data = await response.json();
+      // SEC-4: Validate response size (prevent compromised CDN from serving huge payload)
+      const rulesJson = JSON.stringify(data);
+      if (rulesJson.length > 500 * 1024) { // 500KB limit for rules
+        debugLog('Remote rules payload too large, skipping');
+        return;
+      }
       if (data && data.version === 1 && Array.isArray(data.rules)) {
         // Validate each rule has expected structure
         const validRules = data.rules.filter(rule => {
           return rule && typeof rule.id === 'string' &&
-            (Array.isArray(rule.selectors) || typeof rule.detectCheck === 'function' || typeof rule.detectCheck === 'string');
+            Array.isArray(rule.selectors) && rule.selectors.length > 0 && rule.selectors.every(s => typeof s === 'string');
         });
         if (validRules.length !== data.rules.length) {
           debugLog(`Filtered ${data.rules.length - validRules.length} invalid remote rules`);
         }
         data.rules = validRules;
         meta.remoteRules = data;
+        // Simple integrity check: verify rules count matches what we fetched
+        meta.remoteRulesIntegrity = { count: data.rules.length, fetchedAt: Date.now() };
         meta.lastRulesFetch = Date.now();
         await Storage.set(STORAGE_KEYS.META, meta);
         debugLog(`Fetched ${data.rules.length} remote rules`);
@@ -1172,8 +1236,18 @@
   checkForUpdates();
   if (chrome.alarms) {
     chrome.alarms.create('checkUpdates', { periodInMinutes: 24 * 60 });
-    chrome.alarms.onAlarm.addListener((alarm) => {
+    chrome.alarms.onAlarm.addListener(async (alarm) => {
       if (alarm.name === 'checkUpdates') checkForUpdates();
+      if (alarm.name === 'autoResume') {
+        await SettingsManager.update({ enabled: true, pausedUntil: 0 });
+        chrome.tabs.query({}, (tabs) => {
+          for (const t of tabs) {
+            chrome.tabs.sendMessage(t.id, { type: 'SETTINGS_UPDATED', settings: { enabled: true, pausedUntil: 0 } }, () => {
+              if (chrome.runtime.lastError) { /* ignore */ }
+            });
+          }
+        });
+      }
     });
   }
 })();

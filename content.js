@@ -40,17 +40,8 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
   // in every iframe wastes resources: N iframes = N Engine instances,
   // N MutationObservers, N intervals all scanning for banners that will
   // never appear there.
-  // Version-specific guard prevents double-injection after extension updates
-  const _guardProp = '__cookieReject_' + (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.getManifest ? chrome.runtime.getManifest().version.replace(/\./g, '_') : 'unknown');
-  if (window[_guardProp]) return;
-  window[_guardProp] = true;
-  // Clean up guard properties from older versions
-  for (const key of Object.keys(window)) {
-    if (key.startsWith('__cookieReject_') && key !== _guardProp) {
-      delete window[key];
-    }
-  }
   if (window !== window.top) {
+    // Iframe: run lightweight CMP rejection only, skip full engine
     // Skip non-HTTP iframes (PDF viewers, about:blank, extension pages)
     try {
       const proto = window.location.protocol;
@@ -86,6 +77,17 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     return;
   }
 
+  // Version-specific guard prevents double-injection after extension updates
+  const _guardProp = '__cookieReject_' + (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.getManifest ? chrome.runtime.getManifest().version.replace(/\./g, '_') : 'unknown');
+  if (window[_guardProp]) return;
+  window[_guardProp] = true;
+  // Clean up guard properties from older versions
+  for (const key of Object.keys(window)) {
+    if (key.startsWith('__cookieReject_') && key !== _guardProp) {
+      delete window[key];
+    }
+  }
+
   // ─── Debug Logging ──────────────────────────────────────────────────
   // Toggle via popup settings. Outputs to console when debugMode is on.
   let _debugMode = false;
@@ -102,11 +104,11 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     // Maximum retries before giving up on a page
     maxRetries: 60,  // 30 seconds total (enough for slow async CMP scripts)
     // How long to wait between vendor toggle clicks (ms)
-    vendorToggleDelay: 50,
+    vendorToggleDelay: 30,
     // How long to wait for dynamic content to load after clicking (ms)
-    dynamicLoadDelay: 800,
+    dynamicLoadDelay: 400,
     // How long to wait after scrolling a vendor list (ms)
-    scrollDelay: 300,
+    scrollDelay: 200,
     // Max vendors to process per CMP (safety limit)
     maxVendors: 2000,
     // Observer throttle: minimum ms between detect() calls via MutationObserver
@@ -114,7 +116,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     // Cooldown after a failed rejection attempt (ms)
     failedCooldown: 3000,
     // Delay before calling handler.reject() to let banner JS initialize (ms)
-    preRejectDelay: 800,
+    preRejectDelay: 500,
     // Safety timeout: force-disconnect observer after this many ms
     observerTimeout: 35000,
     // Max time to wait for settings to load before proceeding (ms)
@@ -123,6 +125,14 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     handlerWaitDelay: 800,
     // Top CMPs to check first on observer ticks (most common globally)
     topCMPs: ['onetrust', 'didomi', 'cookieyes', 'usercentrics', 'sourcepoint'],
+    // SPA navigation delay before restarting detection (ms)
+    spaNavigationDelay: 1500,
+    // Delay after rejection before re-checking banner visibility (ms)
+    observerCheckDelay: 500,
+    // Delay for iframe CMP rejection attempt (ms)
+    iframeRejectionDelay: 2000,
+    // Polling interval for settings/whitelist checks (ms)
+    settingsPollInterval: 50,
   };
 
   // ─── Utility helpers ────────────────────────────────────────────────
@@ -153,6 +163,16 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       const rect = el.getBoundingClientRect();
       if (rect.width === 0 && rect.height === 0) return false;
       return true;
+    },
+
+    _visibilityCache: new WeakMap(),
+    isVisibleCached(el) {
+      if (!el) return false;
+      const cached = this._visibilityCache.get(el);
+      if (cached !== undefined && Date.now() - cached.ts < 200) return cached.visible;
+      const visible = this.isVisible(el);
+      this._visibilityCache.set(el, { visible, ts: Date.now() });
+      return visible;
     },
 
     /**
@@ -384,7 +404,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
             const confidence = result instanceof HTMLElement ? 'high' : 'medium';
             matches.push({ id: detector.id, name: detector.name, confidence });
           }
-        } catch (e) { /* skip */ }
+        } catch (e) { /* CMP handler error - expected in non-matching pages */ }
       }
 
       // Pick best match: prefer 'high' confidence over 'medium'
@@ -1281,7 +1301,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         window.UC_UI.rejectAll();
         rejected++;
         return { rejected, vendorsUnticked };
-      } catch (e) { /* API not available, fall through to DOM */ }
+      } catch (e) { /* CMP handler error - expected in non-matching pages */ }
     }
 
     // Fallback: try DOM access (only works with open shadow root)
@@ -3051,6 +3071,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         }
       }
     } catch { /* remote rules not available yet */ }
+    _topDetectorsCache = null; // invalidate so next observer tick rebuilds with new rules
   })();
 
   // ─── TCF API Handler ────────────────────────────────────────────────
@@ -3250,6 +3271,10 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       });
 
       // Start detection -- runs immediately, settings will abort if needed
+      // FEAT-5: Give the page a moment to load before starting detection.
+      // Many CMPs are injected lazily via tag managers (GTM, etc.) and may not
+      // be present immediately at document_idle. This avoids wasted early detection cycles.
+      await Utils.sleep(300);
       this.detectAndReject();
     },
 
@@ -3266,7 +3291,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       if (!this._settingsLoaded) {
         const settingsDeadline = Date.now() + CONFIG.settingsWaitTimeout;
         while (!this._settingsLoaded && Date.now() < settingsDeadline) {
-          await Utils.sleep(50);
+          await Utils.sleep(CONFIG.settingsPollInterval);
         }
         this._settingsLoaded = true; // proceed anyway after timeout
       }
@@ -3275,7 +3300,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       if (!this._whitelistChecked) {
         const wlDeadline = Date.now() + CONFIG.settingsWaitTimeout;
         while (!this._whitelistChecked && Date.now() < wlDeadline) {
-          await Utils.sleep(50);
+          await Utils.sleep(CONFIG.settingsPollInterval);
         }
         if (this._isWhitelisted) {
           this.processed = true;
@@ -3324,11 +3349,11 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
           try {
             const result = det.check();
             if (result) {
-              if (result instanceof HTMLElement && !Utils.isVisible(result)) continue;
+              if (result instanceof HTMLElement && !Utils.isVisibleCached(result)) continue;
               cmp = { id: det.id, name: det.name, confidence: result instanceof HTMLElement ? 'high' : 'medium' };
               break;
             }
-          } catch { /* skip */ }
+          } catch (e) { DebugLog.warn('Operation failed:', e.message); }
         }
         // Only run full detection if top CMPs didn't match
         if (!cmp) {
@@ -3396,10 +3421,10 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
               for (const det of _detectorEntries) {
                 try {
                   const r = det.check();
-                  if (r && (!(r instanceof HTMLElement) || Utils.isVisible(r))) {
+                  if (r && (!(r instanceof HTMLElement) || Utils.isVisibleCached(r))) {
                     return { id: det.id, name: det.name, confidence: r instanceof HTMLElement ? 'high' : 'medium' };
                   }
-                } catch { /* skip */ }
+                } catch (e) { DebugLog.warn('Operation failed:', e.message); }
               }
               return null;
             })();
@@ -3455,7 +3480,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
           const overrideHandler = CMPHandlers[override.override];
           if (overrideHandler) cmp = { id: override.override, name: overrideHandler.name, confidence: 'high' };
         }
-      } catch { /* ignore */ }
+      } catch (e) { DebugLog.warn('Operation failed:', e.message); }
 
       const handler = CMPHandlers[cmp.id];
       if (!handler) return;
@@ -3483,7 +3508,11 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
 
         // Run the CMP-specific rejection
         const result = await handler.reject();
-
+        if (!result) {
+          DebugLog.warn('Handler returned no result:', cmp.name);
+          this._handling = false;
+          return;
+        }
         DebugLog.log('Handler result:', result);
         this._lastVendorsUnticked = result.vendorsUnticked || 0;
 
@@ -3591,7 +3620,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
      */
     async isBannerStillVisible(cmpInfo) {
       // Give the CMP time to process the rejection before re-checking
-      await Utils.sleep(500);
+      await Utils.sleep(CONFIG.observerCheckDelay);
       const handler = CMPHandlers[cmpInfo.id];
       if (!handler || !handler.detect()) return false;
 
@@ -3730,7 +3759,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       // Tear down existing observer and interval to prevent duplicates
       if (Engine.observerActive) {
         Engine.observerActive = false;
-        try { Engine.observer.disconnect(); } catch { /* ignore */ }
+        try { Engine.observer.disconnect(); } catch (e) { DebugLog.warn('Operation failed:', e.message); }
       }
       if (Engine.intervalId) {
         clearInterval(Engine.intervalId);
@@ -3750,7 +3779,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         if (!Engine.processed && !Engine._isWhitelisted) {
           Engine.detectAndReject();
         }
-      }, 1500);
+      }, CONFIG.spaNavigationDelay);
     }
   }
 
@@ -3760,8 +3789,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
 
   // Monkey-patch pushState and replaceState to detect SPA-driven navigation
   // Guard against re-patching if content script is injected multiple times
-  if (!history._cookieRejectPatched) {
-    history._cookieRejectPatched = true;
+  const _patchedHistories = new WeakSet();
+  if (!_patchedHistories.has(history)) {
+    _patchedHistories.add(history);
     const _origPushState = history.pushState;
     const _origReplaceState = history.replaceState;
     if (_origPushState) {

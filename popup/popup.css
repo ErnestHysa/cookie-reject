@@ -524,6 +524,28 @@ body {
   gap: 8px;
   flex-wrap: wrap;
 }
+.data-actions-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.data-actions-row .btn {
+  flex: 1;
+  min-width: 0;
+}
+.data-actions-advanced {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.data-actions-advanced summary {
+  cursor: pointer;
+  padding: 4px 0;
+}
+.data-actions-advanced .btn {
+  margin-top: 6px;
+  margin-right: 6px;
+}
 
 /* ─── Settings ─── */
 .setting-group {
@@ -729,6 +751,17 @@ body {
   margin-bottom: 8px;
   font-size: 12px;
   padding: 6px 10px;
+}
+
+/* UX-3: CMP coverage list */
+.cmp-list-item {
+  display: flex;
+  justify-content: space-between;
+  padding: 4px 0;
+  font-size: 12px;
+}
+.cmp-stat {
+  color: var(--text-secondary);
 }
 
 /* ─── Light Theme (FEAT-7) ─── */

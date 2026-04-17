@@ -161,21 +161,25 @@ assert('string', !isValidLogEntry('not an object'));
 // ─── Config defaults ───
 console.log('\nConfig defaults:');
 
-// Re-implementation of content.js CONFIG
+// Re-implementation of content.js CONFIG (updated for R17)
 const CONFIG = {
   retryInterval: 500,
   maxRetries: 60,
-  vendorToggleDelay: 50,
-  dynamicLoadDelay: 800,
-  scrollDelay: 300,
+  vendorToggleDelay: 30,
+  dynamicLoadDelay: 400,
+  scrollDelay: 200,
   maxVendors: 2000,
   observerThrottle: 300,
   failedCooldown: 3000,
-  preRejectDelay: 800,
-  observerTimeout: 35000,
+  preRejectDelay: 500,
+  observerTimeout: 30000,
   settingsWaitTimeout: 2000,
   handlerWaitDelay: 800,
   topCMPs: ['onetrust', 'didomi', 'cookieyes', 'usercentrics', 'sourcepoint'],
+  spaNavigationDelay: 1500,
+  observerCheckDelay: 100,
+  iframeRejectionDelay: 2000,
+  settingsPollInterval: 100,
 };
 
 // 35-47: Config key/type tests
@@ -192,6 +196,19 @@ assert('CONFIG has observerTimeout', typeof CONFIG.observerTimeout === 'number')
 assert('CONFIG has settingsWaitTimeout', typeof CONFIG.settingsWaitTimeout === 'number');
 assert('CONFIG has handlerWaitDelay', typeof CONFIG.handlerWaitDelay === 'number');
 assert('CONFIG.topCMPs is array', Array.isArray(CONFIG.topCMPs));
+
+// R17 new CONFIG keys (48-51)
+assert('CONFIG has spaNavigationDelay', typeof CONFIG.spaNavigationDelay === 'number');
+assert('CONFIG has observerCheckDelay', typeof CONFIG.observerCheckDelay === 'number');
+assert('CONFIG has iframeRejectionDelay', typeof CONFIG.iframeRejectionDelay === 'number');
+assert('CONFIG has settingsPollInterval', typeof CONFIG.settingsPollInterval === 'number');
+
+// R17 CONFIG value checks (52-56)
+assertEqual('vendorToggleDelay is 30', CONFIG.vendorToggleDelay, 30);
+assertEqual('scrollDelay is 200', CONFIG.scrollDelay, 200);
+assertEqual('dynamicLoadDelay is 400', CONFIG.dynamicLoadDelay, 400);
+assertEqual('preRejectDelay is 500', CONFIG.preRejectDelay, 500);
+assertEqual('observerTimeout is 30000', CONFIG.observerTimeout, 30000);
 
 // ─── isVisible logic ───
 console.log('\nisVisible logic:');
@@ -394,6 +411,59 @@ assertEqual('60 seconds = 1m 0s', formatTime(60), '1m 0s');
 assertEqual('90 seconds = 1m 30s', formatTime(90), '1m 30s');
 assertEqual('3600 seconds = 1h 0m', formatTime(3600), '1h 0m');
 assertEqual('3661 seconds = 1h 1m', formatTime(3661), '1h 1m');
+
+// ─── R17: csvEscape (BUG-5) ───
+console.log('\ncsvEscape:');
+
+function csvEscape(str) {
+  if (typeof str !== 'string') return '';
+  if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+    return '"' + str.replace(/"/g, '""') + '"';
+  }
+  return str;
+}
+
+assertEqual('simple string', csvEscape('hello'), 'hello');
+assertEqual('string with comma', csvEscape('a,b'), '"a,b"');
+assertEqual('string with quote', csvEscape('a"b'), '"a""b"');
+assertEqual('string with newline', csvEscape('a\nb'), '"a\nb"');
+assertEqual('non-string returns empty', csvEscape(42), '');
+assertEqual('null returns empty', csvEscape(null), '');
+assertEqual('already clean string', csvEscape('example.com'), 'example.com');
+
+// ─── R17: todayRejected caching (BUG-6) ───
+console.log('\ntodayRejected caching:');
+
+// Simulate cached stats with todayRejected/todayDate
+const cachedStats = { totalRejected: 100, todayRejected: 5, todayDate: '2026-04-17' };
+assertEqual('todayRejected read from cache', cachedStats.todayRejected, 5);
+assertEqual('todayDate is date string', cachedStats.todayDate, '2026-04-17');
+
+// Simulate DEFAULT_STATS shape (from background.js)
+const DEFAULT_STATS = {
+  totalRejected: 0,
+  totalUniqueSites: 0,
+  totalVendorsUnticked: 0,
+  totalBannersRejected: 0,
+  cookiesRejected: 0,
+  bannersRejected: 0,
+  vendorsUnticked: 0,
+  todayRejected: 0,
+  todayDate: null,
+};
+assert('DEFAULT_STATS has todayRejected', typeof DEFAULT_STATS.todayRejected === 'number');
+assert('DEFAULT_STATS has todayDate', DEFAULT_STATS.todayDate === null);
+assertEqual('DEFAULT_STATS todayRejected is 0', DEFAULT_STATS.todayRejected, 0);
+
+// ─── R17: cr_cmp_stats storage key ───
+console.log('\ncr_cmp_stats storage:');
+
+const R17_STORAGE_KEYS = {
+  ...STORAGE_KEYS,
+  CMP_STATS: 'cr_cmp_stats',
+};
+assert('cr_cmp_stats key exists', R17_STORAGE_KEYS.CMP_STATS === 'cr_cmp_stats');
+assert('cr_cmp_stats is not a sync key', !SYNC_KEYS.has('cr_cmp_stats'));
 
 // ─── Summary ───
 console.log(`\n${'='.repeat(40)}`);

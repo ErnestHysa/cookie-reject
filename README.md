@@ -76,10 +76,22 @@ Also uses IAB consent APIs (TCF v2, USP, GPP) to reject programmatically where a
 - **Privacy-first** -- all data stored locally. Checks for extension updates via GitHub API (no personal data sent)
 - **Import/Export** -- backup your settings, whitelist, and stats
 - **Debug mode** -- toggle console logging for troubleshooting
-- **Keyboard shortcut** -- Alt+Shift+R for manual rejection
+- **Dry run mode** -- detect banners without rejecting (for testing)
+- **Keyboard shortcuts** -- Alt+Shift+R (reject now), Alt+Shift+C (toggle on/off)
 - **Smart verification** -- confirms banners actually disappeared after rejection
 - **Whitelist/Blacklist** -- per-site control
 - **CCPA support** -- handles "Do Not Sell" and opt-out banners
+- **Theme toggle** -- dark and light themes
+- **Per-CMP stats** -- track success/failure rate per framework
+- **Pause feature** -- temporarily disable for N minutes
+
+## Privacy & Permissions
+
+CookieReject requests `<all_urls>` host permissions because it needs to inject a content script on every page to detect and reject cookie banners. It cannot know in advance which sites will have banners.
+
+**What data is collected:** None. All stats, activity logs, and settings are stored locally in `chrome.storage`. No data is sent to any server.
+
+**Network requests:** The extension makes one request per day to the GitHub Releases API to check for updates, and one request per week to fetch updated CMP detection rules from the repository's `rules.json`. These requests expose your IP address to GitHub but transmit no personal information. Both features can be disabled by setting `debugMode` to `false` (they are controlled by the background service worker).
 
 ## Supported CMP Frameworks
 

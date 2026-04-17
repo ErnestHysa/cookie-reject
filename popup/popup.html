@@ -133,11 +133,16 @@
       <div class="list-section">
         <h3>Data Management</h3>
         <div class="data-actions">
-          <button class="btn btn-outline" id="exportBtn">Export Data</button>
-          <button class="btn btn-outline" id="exportCsvBtn">Export CSV</button>
-          <button class="btn btn-outline" id="importBtn">Import Data</button>
-          <button class="btn btn-outline btn-sm" id="exportWhitelistBtn">Export Whitelist</button>
-          <button class="btn btn-outline btn-sm" id="exportBlacklistBtn">Export Blacklist</button>
+          <div class="data-actions-row">
+            <button class="btn btn-outline" id="exportBtn">Export All Data</button>
+            <button class="btn btn-outline" id="exportCsvBtn">Export CSV</button>
+            <button class="btn btn-outline" id="importBtn">Import Data</button>
+          </div>
+          <details class="data-actions-advanced">
+            <summary>Advanced Export</summary>
+            <button class="btn btn-outline btn-sm" id="exportWhitelistBtn">Export Whitelist</button>
+            <button class="btn btn-outline btn-sm" id="exportBlacklistBtn">Export Blacklist</button>
+          </details>
           <input type="file" id="importFile" accept=".json" style="display:none">
         </div>
       </div>
@@ -223,6 +228,16 @@
         </div>
       </div>
       </div><!-- /settingsControls -->
+      <div class="setting-group">
+        <h3>CMP Coverage</h3>
+        <div class="setting-item">
+          <div>
+            <div class="setting-name">Supported Frameworks</div>
+            <div class="setting-desc">48 CMP handlers (47 named + 1 generic fallback)</div>
+          </div>
+          <button class="btn btn-sm btn-outline" id="showCMPListBtn">View List</button>
+        </div>
+      </div>
       <div class="footer">
         Supports 48 CMP frameworks
         <span class="footer-sep">|</span>

@@ -3,6 +3,9 @@
  * Handles all interactions in the browser extension popup.
  */
 
+// SECURITY NOTE: All innerHTML assignments in this file use escapeHTML() for
+// user-controlled data. When adding new HTML assignments, ALWAYS escape dynamic content.
+
 (function () {
   'use strict';
 
@@ -59,17 +62,18 @@
     `).join('');
   }
 
-  function formatTimestamp(ts) {
+  function formatTimestamp(ts, detailed = false) {
     if (!ts) return '';
-    const d = new Date(ts);
-    const now = new Date();
-    const diffMs = now - d;
-    const diffMin = Math.floor(diffMs / 60000);
-
-    if (diffMin < 1) return 'Just now';
-    if (diffMin < 60) return `${diffMin}m ago`;
-    if (diffMin < 1440) return `${Math.floor(diffMin / 60)}h ago`;
-    return d.toLocaleDateString();
+    const seconds = Math.floor((Date.now() - ts) / 1000);
+    if (seconds < 0) return 'Just now';
+    if (seconds < 60) return 'Just now';
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    if (days < 7) return `${days}d ago`;
+    return new Date(ts).toLocaleDateString();
   }
 
   function showToast(message, isError = false) {
@@ -303,7 +307,7 @@
     sendMessage({ type: 'GET_LOG_FOR_DOMAIN', domain }).then((entries) => {
       if (entries && entries.length > 0) {
         const last = entries[0]; // most recent
-        const ago = formatTimeAgo(last.timestamp);
+        const ago = formatTimestamp(last.timestamp);
         $('siteLastAction').textContent = ago;
       } else {
         $('siteLastAction').textContent = 'Just now';
@@ -311,18 +315,6 @@
     }).catch(() => {
       $('siteLastAction').textContent = '-';
     });
-  }
-
-  function formatTimeAgo(timestamp) {
-    if (!timestamp) return '-';
-    const seconds = Math.floor((Date.now() - timestamp) / 1000);
-    if (seconds < 60) return `${seconds}s ago`;
-    const minutes = Math.floor(seconds / 60);
-    if (minutes < 60) return `${minutes}m ago`;
-    const hours = Math.floor(minutes / 60);
-    if (hours < 24) return `${hours}h ago`;
-    const days = Math.floor(hours / 24);
-    return `${days}d ago`;
   }
 
   // ─── Stats ─────────────────────────────────────────────────────────
@@ -345,13 +337,21 @@
   // Fix #23: pagination state
   let activityLimit = 30;
   let _allActivityEntries = [];
+  let _allLoaded = false;
   let _searchDebounce = null;
 
   async function loadActivity(loadMore = false) {
     if (!loadMore) {
       activityLimit = 30;
+      const log = await sendMessage({ type: 'GET_LOG', limit: 30 });
+      _allActivityEntries = log || [];
+      _allLoaded = false;
+    } else if (!_allLoaded) {
+      // First "Load More" fetches the rest
       const log = await sendMessage({ type: 'GET_LOG', limit: 500 });
       _allActivityEntries = log || [];
+      _allLoaded = true;
+      activityLimit += 30;
     } else {
       activityLimit += 30;
     }
@@ -521,6 +521,9 @@
           loadCurrentSite();
         });
       } else {
+        // UX-5: Warn user about blacklist behavior
+        const confirmed = await showConfirm('Blacklist forces rejection even when the extension is disabled. Continue?');
+        if (!confirmed) return;
         await sendMessage({ type: 'ADD_TO_LIST', list: 'blacklist', domain: tabInfo.domain });
         $('blacklistBtn').textContent = 'Remove from Blacklist';
         $('blacklistBtn').dataset.action = 'remove-blacklist';
@@ -713,8 +716,18 @@
   function exportCSV() {
     sendMessage({ type: 'GET_LOG', limit: 500 }).then(log => {
       if (!log || log.length === 0) { showToast('No data to export', true); return; }
+      function csvEscape(str) {
+        if (!str) return '';
+        const s = String(str);
+        if (s.includes(',') || s.includes('"') || s.includes('\n')) {
+          return '"' + s.replace(/"/g, '""') + '"';
+        }
+        return s;
+      }
       const header = 'Domain,CMP,Vendors Unticked,Timestamp\n';
-      const rows = log.map(e => '"' + e.domain + '","' + (e.cmp || '') + '",' + (e.vendorsUnticked || 0) + ',"' + new Date(e.timestamp).toISOString() + '"').join('\n');
+      const rows = log.map(e =>
+        csvEscape(e.domain) + ',' + csvEscape(e.cmp) + ',' + (e.vendorsUnticked || 0) + ',' + csvEscape(new Date(e.timestamp).toISOString())
+      ).join('\n');
       const blob = new Blob([header + rows], { type: 'text/csv' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -769,10 +782,12 @@
     $('themeToggle').addEventListener('click', toggleTheme);
 
     // FEAT-5: Report undetected banner
-    $('reportBanner').addEventListener('click', () => {
+    $('reportBanner').addEventListener('click', async () => {
       const domain = $('siteDomain').textContent;
       const detectedCMP = $('siteCMP') ? $('siteCMP').textContent : 'None';
-      const url = `https://github.com/ErnestHysa/cookie-reject/issues/new?title=Undetected+banner+on+${encodeURIComponent(domain)}&body=${encodeURIComponent(`**URL:** ${domain}\n**Browser:** ${navigator.userAgent}\n**Extension version:** ${$('version').textContent}\n**Detected CMP:** ${detectedCMP}\n\n**Description:**\nPlease describe the banner and any relevant details about the website.`)}`;
+      const tabInfo = await sendMessage({ type: 'GET_CURRENT_TAB_INFO' });
+      const pageUrl = tabInfo ? tabInfo.url : domain;
+      const url = `https://github.com/ErnestHysa/cookie-reject/issues/new?title=Undetected+banner+on+${encodeURIComponent(domain)}&body=${encodeURIComponent(`**URL:** ${pageUrl}\n**Browser:** ${navigator.userAgent}\n**Extension version:** ${$('version').textContent}\n**Detected CMP:** ${detectedCMP}\n\n**Description:**\nPlease describe the banner and any relevant details about the website.`)}`;
       chrome.tabs.create({ url });
     });
 
@@ -821,6 +836,19 @@
         $('loadMoreBtn').style.display = filtered.length > activityLimit ? 'block' : 'none';
       }, 150);
     });
+
+    // UX-3: CMP coverage info
+    if ($('showCMPListBtn')) {
+      $('showCMPListBtn').addEventListener('click', async () => {
+        const cmpStats = await sendMessage({ type: 'GET_CMP_STATS' });
+        const handlers = ['onetrust','fides','ketch','cookiebot','didomi','sourcepoint','trustarc','quantcast','usercentrics','cookieyes','iubenda','consentmanager','sirdata','ezcookie','borlabs','lgcookieslaw','complianz','cookienotice','osano','termly','cookieinfo','realcookiebanner','moovegdpr','cookieadmin','beautifulcookie','pressidium','wplpcookie','axeptio','admiral','commandersact','cookiefirst','cookiehub','gravito','truendo','clickio','appconsent','cloudflare','securiti','transcend','civic','fastcmp','lawwwing','avacy','consentmo','pandectes','enzuzo','cookiescript','generic'];
+        const listHtml = handlers.map(h => {
+          const stats = cmpStats[h] || { success: 0, failed: 0 };
+          return `<div class="cmp-list-item"><span>${h}</span><span class="cmp-stat">${stats.success}/${stats.success + stats.failed}</span></div>`;
+        }).join('');
+        showToast(`CMP list: ${handlers.length} handlers`);
+      });
+    }
   }
 
   // ─── Smart Polling ─────────────────────────────────────────────────
@@ -868,6 +896,16 @@
       loadSettings(),
     ]);
     startSmartPolling();
+
+    // UX-6: Show update notification if recently updated
+    try {
+      const meta = await sendMessage({ type: 'GET_VERSION' });
+      const lastSeenVersion = localStorage.getItem('cr_lastSeenVersion');
+      if (lastSeenVersion && lastSeenVersion !== meta.version) {
+        showToast(`Updated to v${meta.version}! Check what's new.`);
+      }
+      localStorage.setItem('cr_lastSeenVersion', meta.version);
+    } catch { /* ignore */ }
   }
 
   // ─── Boot ──────────────────────────────────────────────────────────

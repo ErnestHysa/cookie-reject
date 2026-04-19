@@ -806,7 +806,7 @@
               chrome.tabs.query({ active: true, currentWindow: true }, resolve);
             });
             if (tabs[0]) {
-              await new Promise((resolve, reject) => {
+              const result = await new Promise((resolve, reject) => {
                 try {
                   chrome.scripting.executeScript({
                     target: { tabId: tabs[0].id },
@@ -837,6 +837,8 @@
                   resolve({ success: false });
                 }
               });
+              // BUG-2 fix: return the actual promise result instead of always-false
+              return result;
             }
           } catch (e) {
             debugLog('REJECT_CONSENT_MODE failed (CSP or permissions):', e.message);
@@ -1058,11 +1060,12 @@
     if (command === 'toggle-global') {
       debugLog('Keyboard shortcut triggered: toggle-global');
       const settings = await SettingsManager.get();
-      await SettingsManager.update({ enabled: !settings.enabled });
-      // Broadcast to all tabs
+      const newEnabled = !settings.enabled;
+      await SettingsManager.update({ enabled: newEnabled });
+      // Broadcast to all tabs (BUG-1 fix: use newEnabled, not recomputed stale value)
       chrome.tabs.query({}, (tabs) => {
         for (const t of tabs) {
-          chrome.tabs.sendMessage(t.id, { type: 'SETTINGS_UPDATED', settings: { enabled: !settings.enabled } }, () => {
+          chrome.tabs.sendMessage(t.id, { type: 'SETTINGS_UPDATED', settings: { enabled: newEnabled } }, () => {
             if (chrome.runtime.lastError) { /* ignore */ }
           });
         }
@@ -1189,6 +1192,7 @@
   // Stored in cr_meta.remoteRules for content script to pick up.
   const RULES_URL = `https://raw.githubusercontent.com/${UPDATE_REPO}/main/rules.json`;
   const RULES_FETCH_INTERVAL = 7 * 24 * 60 * 60 * 1000; // 7 days
+  let _rulesFetchFailures = 0; // CODE-3: exponential backoff counter
 
   async function fetchRemoteRules() {
     try {
@@ -1199,7 +1203,16 @@
       const response = await fetch(RULES_URL, {
         headers: { 'Accept': 'application/json' },
       });
-      if (!response.ok) return;
+      if (!response.ok) {
+        // CODE-3: exponential backoff on HTTP errors
+        _rulesFetchFailures++;
+        const backoff = Math.min(RULES_FETCH_INTERVAL, RULES_FETCH_INTERVAL * Math.pow(2, _rulesFetchFailures - 1));
+        debugLog(`Rules fetch HTTP ${response.status}, backing off ${Math.round(backoff / 1000)}s (attempt ${_rulesFetchFailures})`);
+        // Update lastRulesFetch to delay next attempt
+        meta.lastRulesFetch = Date.now() - RULES_FETCH_INTERVAL + backoff;
+        await Storage.set(STORAGE_KEYS.META, meta);
+        return;
+      }
 
       const data = await response.json();
       // SEC-4: Validate response size (prevent compromised CDN from serving huge payload)
@@ -1223,6 +1236,7 @@
         meta.remoteRulesIntegrity = { count: data.rules.length, fetchedAt: Date.now() };
         meta.lastRulesFetch = Date.now();
         await Storage.set(STORAGE_KEYS.META, meta);
+        _rulesFetchFailures = 0; // CODE-3: reset backoff on success
         debugLog(`Fetched ${data.rules.length} remote rules`);
       }
     } catch (e) {

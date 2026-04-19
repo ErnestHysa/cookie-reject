@@ -900,11 +900,13 @@
     // UX-6: Show update notification if recently updated
     try {
       const meta = await sendMessage({ type: 'GET_VERSION' });
-      const lastSeenVersion = localStorage.getItem('cr_lastSeenVersion');
+      // SEC-1 fix: use chrome.storage.local instead of raw localStorage
+      const stored = await chrome.storage.local.get('cr_lastSeenVersion');
+      const lastSeenVersion = stored.cr_lastSeenVersion || null;
       if (lastSeenVersion && lastSeenVersion !== meta.version) {
         showToast(`Updated to v${meta.version}! Check what's new.`);
       }
-      localStorage.setItem('cr_lastSeenVersion', meta.version);
+      await chrome.storage.local.set({ cr_lastSeenVersion: meta.version });
     } catch { /* ignore */ }
   }
 

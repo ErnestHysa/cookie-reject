@@ -73,7 +73,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
           if (match) { match.click(); break; }
         }
       } catch (e) { /* iframe rejection failed silently */ }
-    }, 2000);
+    }, 2000); // mirrors CONFIG.iframeRejectionDelay (CONFIG not yet defined in iframe path)
     return;
   }
 
@@ -133,6 +133,10 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     iframeRejectionDelay: 2000,
     // Polling interval for settings/whitelist checks (ms)
     settingsPollInterval: 50,
+    // Initial delay before first detection to allow page/CMP to load (ms)
+    initDelay: 300,
+    // TCF API listener timeout -- how long to wait for CMP response (ms)
+    tcfApiTimeout: 2000,
   };
 
   // ─── Utility helpers ────────────────────────────────────────────────
@@ -799,7 +803,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
           if (toggle.checked && !toggle.disabled) {
             toggle.click();
             rejected++;
-            await Utils.sleep(30);
+            await Utils.sleep(CONFIG.vendorToggleDelay);
           }
         }
 
@@ -818,7 +822,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
             if (toggle.checked && !toggle.disabled) {
               toggle.click();
               vendorsUnticked++;
-              await Utils.sleep(30);
+              await Utils.sleep(CONFIG.vendorToggleDelay);
             }
           }
         }
@@ -886,7 +890,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         if (toggle.checked) {
           toggle.click();
           rejected++;
-          await Utils.sleep(30);
+          await Utils.sleep(CONFIG.vendorToggleDelay);
         }
       }
 
@@ -903,7 +907,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
           if (toggle.checked) {
             toggle.click();
             vendorsUnticked++;
-            await Utils.sleep(30);
+            await Utils.sleep(CONFIG.vendorToggleDelay);
           }
         }
       }
@@ -1474,7 +1478,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
           const isChecked = toggleAll.getAttribute('aria-checked') === 'true';
           if (isChecked) {
             toggleAll.click();
-            await Utils.sleep(100);
+            await Utils.sleep(CONFIG.handlerWaitDelay);
           }
         }
 
@@ -1486,7 +1490,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
           if (isChecked) {
             toggle.click();
             vendorsUnticked++;
-            await Utils.sleep(30);
+            await Utils.sleep(CONFIG.vendorToggleDelay);
           }
         }
       }
@@ -2970,16 +2974,17 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
         }
 
         // Multi-step wizard: click "Next" / "Continue" to advance through steps,
-        // unticking toggles at each step before proceeding.
+        // unticking toggles at each step before proceeding.  (PERF-2: arrays
+        // lifted out of loop; max 5 wizard steps as safety limit.)
         const nextTexts = ['next', 'continue', 'weiter', 'suivant', 'siguiente', 'avanti', 'volgende'];
+        const maxWizardSteps = 5;
         let wizardSteps = 0;
-        const maxWizardSteps = 5; // safety limit
         while (wizardSteps < maxWizardSteps) {
-          // Untick toggles on current step
-          const modals = document.querySelectorAll(
+          // Untick toggles on current wizard step
+          const wizardModals = document.querySelectorAll(
             '[role="dialog"], [class*="modal"], [class*="popup"], [class*="overlay"]'
           );
-          for (const modal of modals) {
+          for (const modal of wizardModals) {
             const result = await Utils.untickAllToggles(modal);
             vendorsUnticked += result;
           }
@@ -2995,11 +3000,11 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
           wizardSteps++;
         }
 
-        // Untick all toggles
-        const modals = document.querySelectorAll(
+        // After wizard completes (or skipped), untick any remaining toggles
+        const postModals = document.querySelectorAll(
           '[role="dialog"], [class*="modal"], [class*="popup"], [class*="overlay"]'
         );
-        for (const modal of modals) {
+        for (const modal of postModals) {
           const result = await Utils.untickAllToggles(modal);
           vendorsUnticked += result;
 
@@ -3106,7 +3111,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
               finish();
             });
             // Timeout after 2s if CMP doesn't respond
-            setTimeout(finish, 2000);
+            setTimeout(finish, CONFIG.tcfApiTimeout);
           });
         } catch (e) { /* ignore */ }
       }
@@ -3185,9 +3190,9 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
     // Shared map of primary banner selectors per CMP.
     // Used by both isCMPBannerVisible() and isBannerStillVisible().
     get _primarySelectors() {
-      // Merge auto-registered selectors from registerHandler() with any overrides
-      return { ..._autoSelectors };
-
+      // Auto-registered selectors from registerHandler() -- read-only consumers,
+      // no need to spread a fresh object on every access (PERF-1 fix).
+      return _autoSelectors;
     },
     initialized: false,
     intervalRetries: 0,
@@ -3274,7 +3279,7 @@ if (typeof chrome === 'undefined' && typeof browser !== 'undefined') {
       // FEAT-5: Give the page a moment to load before starting detection.
       // Many CMPs are injected lazily via tag managers (GTM, etc.) and may not
       // be present immediately at document_idle. This avoids wasted early detection cycles.
-      await Utils.sleep(300);
+      await Utils.sleep(CONFIG.initDelay);
       this.detectAndReject();
     },
 

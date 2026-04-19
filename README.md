@@ -172,8 +172,7 @@ cookie-reject/
 │   └── popup.js           # Popup controller
 ├── icons/                 # Extension icons (16/32/48/128 PNG)
 ├── tests/
-│   ├── test-utils.js         # Unit tests for utility functions
-│   └── test-integration.js   # Puppeteer integration tests
+│   └── test-utils.js         # Unit tests for utility functions
 ├── .gitignore
 ├── CHANGELOG.md           # Version history
 ├── LICENSE                # MIT

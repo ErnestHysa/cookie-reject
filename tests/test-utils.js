@@ -121,7 +121,8 @@ console.log('\nHTML Escape:');
 
 function escapeHTML(str) {
   if (!str) return '';
-  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+  return str.replace(/[&<>"']/g, c => map[c]);
 }
 
 // 19-26: Original escapeHTML tests
@@ -130,6 +131,7 @@ assertEqual('less than', escapeHTML('a<b'), 'a&lt;b');
 assertEqual('greater than', escapeHTML('a>b'), 'a&gt;b');
 assertEqual('quotes', escapeHTML('a"b'), 'a&quot;b');
 assertEqual('combined', escapeHTML('<script>"x"&y</script>'), '&lt;script&gt;&quot;x&quot;&amp;y&lt;/script&gt;');
+assertEqual('single quotes', escapeHTML("it's"), 'it&#39;s'); // BUG-6 fix
 assertEqual('empty string', escapeHTML(''), '');
 assertEqual('null', escapeHTML(null), '');
 assertEqual('normal text', escapeHTML('hello world'), 'hello world');

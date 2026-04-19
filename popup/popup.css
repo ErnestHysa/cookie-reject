@@ -349,6 +349,8 @@ body {
   font-weight: 700;
   color: var(--accent);
   line-height: 1.2;
+  /* UX-2: smooth animation when values change */
+  transition: opacity 0.3s ease;
 }
 
 .stat-label {
